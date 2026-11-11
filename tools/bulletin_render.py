@@ -202,10 +202,148 @@ def _ladder_rows(c: dict) -> list[list[str]]:
     ]
 
 
-def _deep_md(d: dict) -> list[str]:
+def _status_label(status: str) -> str:
+    return {
+        "filled": "Open — running",
+        "t1_hit": "T1 hit, runner on",
+        "t2_hit": "T2 hit ✓",
+        "stopped": "Stopped out",
+        "no_fill": "Never triggered",
+        "expired": "Trigger expired",
+        "pending_fill": "Waiting for trigger",
+    }.get(status, status)
+
+
+def _r_fmt(r) -> str:
+    if r is None:
+        return "—"
+    return f"{r:+.1f}R"
+
+
+def _calls_md(d: dict, sec=None) -> list[str]:
+    card = d.get("scorecard") or {}
+    num = (sec[0] + 1) if sec is not None else 7
+    if sec is not None:
+        sec[0] += 1
+    L = [f"## {num}. How our calls did", ""]
+
+    if not card.get("attempted"):
+        pend = card.get("pending_count") or 0
+        if pend:
+            L.append(f"_{pend} plan(s) are on the book and waiting for the next session. "
+                     "Nothing has been graded yet — the first verdicts appear after the "
+                     "next close, including the triggers that never fill._")
+        else:
+            L.append("_No tracked recommendations yet. Today's plans are recorded and will "
+                     "be graded from the next session._")
+        L.append("")
+        return L
+
+    L.append(f"**Last {card['sessions_window']} sessions.** "
+             f"{card['fills']} of {card['attempted']} triggers filled "
+             f"({card['fill_rate_pct']:.0f}%). Of the filled trades that reached a decision, "
+             f"{card['wins']} of {card['decided']} hit a target "
+             f"({card['hit_rate_pct']:.0f}%), average {_r_fmt(card['avg_r'])}, "
+             f"{_r_fmt(card['total_r'])} across the sample.")
+    L.append("")
+
+    closed = card.get("closed_rows") or []
+    L.append("### Closed today")
+    L.append("")
+    if closed:
+        L.append("| Stock | Session | Outcome | Entry | Exit | R | What happened |")
+        L.append("|---|---|---|---|---|---|---|")
+        for r in closed:
+            L.append(f"| {r['symbol']} | {r['date']} | {_status_label(r['status'])} | "
+                     f"{_n(r.get('fill_price') or r.get('entry'))} | "
+                     f"{_n(r.get('exit_price'))} | {_r_fmt(r.get('r'))} | "
+                     f"{r.get('exit_reason') or '—'} |")
+    else:
+        L.append("_Nothing closed today._")
+    L.append("")
+
+    open_rows = card.get("open_rows") or []
+    if open_rows:
+        L.append("### Still open")
+        L.append("")
+        L.append("| Stock | Entry | Stop | T1 | T2 | Last | R now | Days |")
+        L.append("|---|---|---|---|---|---|---|---|")
+        for r in open_rows:
+            L.append(f"| {r['symbol']} | {_n(r.get('fill_price') or r.get('entry'))} | "
+                     f"{_n(r.get('stop'))} | {_n(r.get('t1'))} | {_n(r.get('t2'))} | "
+                     f"{_n(r.get('last_close'))} | {_r_fmt(r.get('r'))} | "
+                     f"{r.get('sessions') or 0} |")
+        L.append("")
+
+    focus = d.get("focus") or []
+    if focus:
+        L.append("### What to focus on next session")
+        L.append("")
+        for f in focus:
+            L.append(f"- {f}")
+        L.append("")
+    return L
+
+
+def _calls_html(a, d: dict, h2) -> None:
+    card = d.get("scorecard") or {}
+    h2("How our calls did")
+
+    if not card.get("attempted"):
+        pend = card.get("pending_count") or 0
+        if pend:
+            a(f"<div class='callout'><b>{pend} plan(s) on the book.</b> These are waiting for "
+              "the next session. Nothing has been graded yet — first verdicts land after the "
+              "next close, and they include the triggers that never fill.</div>")
+        else:
+            a("<div class='callout'><b>No tracked recommendations yet.</b> Today's plans are "
+              "recorded and graded from the next session.</div>")
+        a("</section>")
+        return
+
+    a(f"<div class='callout'><b>Last {card['sessions_window']} sessions.</b> "
+      f"{card['fills']} of {card['attempted']} triggers filled "
+      f"({card['fill_rate_pct']:.0f}%). Of the trades that reached a decision, "
+      f"{card['wins']} of {card['decided']} hit a target ({card['hit_rate_pct']:.0f}%), "
+      f"average {_r_fmt(card['avg_r'])}, {_r_fmt(card['total_r'])} across the sample.</div>")
+
+    closed = card.get("closed_rows") or []
+    a("<div class='dhd'>Closed today</div>")
+    if closed:
+        rows = [[r["symbol"], r["date"], _status_label(r["status"]),
+                 _n(r.get("fill_price") or r.get("entry")),
+                 _n(r.get("exit_price")), _r_fmt(r.get("r")),
+                 _h.escape(str(r.get("exit_reason") or "—"))] for r in closed]
+        a(_table(["Stock", "Session", "Outcome", "Entry", "Exit", "R", "What happened"], rows))
+    else:
+        a("<p class='small'>Nothing closed today.</p>")
+
+    open_rows = card.get("open_rows") or []
+    if open_rows:
+        a("<div class='dhd'>Still open</div>")
+        rows = [[r["symbol"], _n(r.get("fill_price") or r.get("entry")),
+                 _n(r.get("stop")), _n(r.get("t1")), _n(r.get("t2")),
+                 _n(r.get("last_close")), _r_fmt(r.get("r")),
+                 str(r.get("sessions") or 0)] for r in open_rows]
+        a(_table(["Stock", "Entry", "Stop", "T1", "T2", "Last", "R now", "Days"], rows))
+
+    focus = d.get("focus") or []
+    if focus:
+        a("<div class='dhd'>What to focus on next session</div><ul class='clean'>")
+        for f in focus:
+            a(f"<li>{_h.escape(f)}</li>")
+        a("</ul>")
+
+    a("</section>")
+
+
+def _deep_md(d: dict, sec=None) -> list[str]:
     deep = d.get("deep") or {}
     cands = deep.get("candidates") or []
-    L = ["## 6. The 100% Club — the path to doubling", ""]
+    num = (sec[0] + 1) if sec is not None else 6
+    if sec is not None:
+        sec[0] += 1
+    L = [f"## {num}. The 100% Club — the path to doubling", ""]
     L.append("> **Read this first.** No setup guarantees a 100% gain, and anyone who says "
              "otherwise is selling something. This section shows the three things that actually "
              "decide a doubler: the structure, the stock's own history of doubling from a "
@@ -290,6 +428,12 @@ def render_md(d: dict) -> str:
     mode = d.get("mode", "intraday")
     L = []
     a = L.append
+    sec = [0]
+
+    def h2(title: str) -> None:
+        sec[0] += 1
+        a(f"## {sec[0]}. {title}")
+        a("")
 
     heading = {"daily": "Pre-market Brief", "eod": "Closing Wrap"}.get(mode, "Market Bulletin")
     a(f"# {heading} — India — {d['generated_at'][:16].replace('T', ' ')}")
@@ -329,7 +473,7 @@ def render_md(d: dict) -> str:
           + (f" Names on the move: {top}." if top else ""))
     a("")
 
-    a("## 1. Market Regime")
+    h2("Market Regime")
     a("")
     a(f"**{reg['label']}** — risk score {reg['risk_score']}/100 (lower is safer). "
       f"Exposure ceiling {reg['exposure_pct']}% of trading capital, "
@@ -348,7 +492,7 @@ def render_md(d: dict) -> str:
       f"{dc.get('d25', 0)} in 25.")
     a("")
 
-    a("## 2. Sector Rotation")
+    h2("Sector Rotation")
     a("")
     a(f"_{d['sectors']['summary']}_")
     a("")
@@ -364,7 +508,7 @@ def render_md(d: dict) -> str:
             for s in d["sectors"]["size"]))
         a("")
 
-    a("## 3. Momentum — what moved")
+    h2("Momentum — what moved")
     a("")
     a("| # | Stock | Close | RS | Score | From 52W high | Trigger |")
     a("|---|---|---|---|---|---|---|")
@@ -373,7 +517,7 @@ def render_md(d: dict) -> str:
           f"{_pct(m['from_high'], 1)} | {'; '.join(m['signals']) or '—'} |")
     a("")
 
-    a("## 4. Breakout Setups")
+    h2("Breakout Setups")
     a("")
     uni = d.get("universe") or {}
     if uni.get("label"):
@@ -387,11 +531,15 @@ def render_md(d: dict) -> str:
           f"{_pct(s['from_pivot_pct'])} | {_n(s['liquidity_cr'], 1)} |")
     a("")
 
-    L_deep = _deep_md(d)
+    if d.get("scorecard") and mode in ("daily", "eod"):
+        for line in _calls_md(d, sec):
+            a(line)
+
+    L_deep = _deep_md(d, sec)
     for line in L_deep:
         a(line)
 
-    a("## 7. Trade Plans")
+    h2("Trade Plans")
     a("")
     a("### Plain English first")
     a("")
@@ -460,13 +608,13 @@ def render_md(d: dict) -> str:
         a(f"{i}. {item}")
     a("")
 
-    a("## 8. Headlines")
+    h2("Headlines")
     a("")
     for h in d["headlines"]:
         a(f"- [{h['title']}]({h['url']})")
     a("")
 
-    a("## 9. Glossary")
+    h2("Glossary")
     a("")
     a("| Term | Plain meaning |")
     a("|---|---|")
@@ -735,6 +883,11 @@ footer{
 
     H = []
     a = H.append
+    sec = [0]
+
+    def h2(title: str) -> None:
+        sec[0] += 1
+        a(f"<section><h2><span class='num'>{sec[0]}</span>{title}</h2>")
     a("<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>")
     a("<meta name='viewport' content='width=device-width,initial-scale=1'>")
     a(f"<title>{_h.escape(title)}</title><style>{css}</style></head><body>")
@@ -749,7 +902,7 @@ footer{
     a("<div class='wrap'>")
 
     # --- At a glance ---
-    a("<section><h2><span class='num'>1</span>At a glance</h2>")
+    h2("At a glance")
     _cal = d.get("calendar") or {}
     if not _cal.get("trading_day", True):
         _nxt = _cal.get("next_trading_day")
@@ -805,7 +958,7 @@ footer{
     a("</section>")
 
     # --- Regime ---
-    a("<section><h2><span class='num'>2</span>Market regime</h2>")
+    h2("Market regime")
     a(f"<p class='lead'>{_h.escape(reg['stance'])}</p>")
     rows = []
     for k, v in (reg["risk_parts"] or {}).items():
@@ -826,7 +979,7 @@ footer{
     a("</section>")
 
     # --- Sectors ---
-    a("<section><h2><span class='num'>3</span>Sector rotation</h2>")
+    h2("Sector rotation")
     buckets = {"Leading": [], "Improving": [], "Weakening": [], "Lagging": []}
     for s in d["sectors"]["rows"]:
         buckets.setdefault(s["quadrant"] or "Lagging", []).append(s["key"])
@@ -877,7 +1030,7 @@ footer{
     a("</section>")
 
     # --- Momentum ---
-    a("<section><h2><span class='num'>4</span>Momentum — what moved</h2>")
+    h2("Momentum — what moved")
     a(f"<p class='small'>Scanned {d['momentum']['scanned']} NSE names for momentum bursts "
       f"(a 4%+ up-close out of a quiet base on rising volume) and episodic pivots "
       f"(a gap-up on 3x+ volume). RS is a 1–99 relative-strength grade against Nifty.</p>")
@@ -894,7 +1047,7 @@ footer{
     a("</section>")
 
     # --- Breakouts ---
-    a("<section><h2><span class='num'>5</span>Breakout setups</h2>")
+    h2("Breakout setups")
     _uni = d.get("universe") or {}
     if _uni.get("label"):
         a(f"<p class='small'>Universe: <b>{_h.escape(str(_uni['label']))}</b> · last bar "
@@ -918,7 +1071,7 @@ footer{
     # --- 100% club ---
     deep = d.get("deep") or {}
     cands = deep.get("candidates") or []
-    a("<section><h2><span class='num'>6</span>The 100% Club</h2>")
+    h2("The 100% Club")
     a("<div class='callout'><b>No setup guarantees 100%.</b> Anyone who says otherwise is "
       "selling something. What this section does is show the three things that actually decide "
       "a doubler: the <b>structure</b>, the stock's own <b>history</b> of doubling from a "
@@ -996,8 +1149,12 @@ footer{
         a(f"<p class='small'>{_h.escape(deep.get('disclaimer') or '')}</p>")
     a("</section>")
 
+    # --- How our calls did (daily + eod only) ---
+    if d.get("scorecard") and d.get("mode") in ("daily", "eod"):
+        _calls_html(a, d, h2)
+
     # --- Plans ---
-    a("<section><h2><span class='num'>7</span>Trade plans</h2>")
+    h2("Trade plans")
     ready = [p for p in d["plans"] if plan_verdict(p)[1] == "good"]
     if d["plans"] and not ready:
         a("<div class='callout warn'><b>No A-grade setup today.</b> "
@@ -1077,7 +1234,7 @@ footer{
     a("</section>")
 
     # --- Headlines ---
-    a("<section><h2><span class='num'>8</span>Headlines</h2>")
+    h2("Headlines")
     if d["headlines"]:
         a("<ul class='clean headlines'>")
         for h in d["headlines"]:
@@ -1088,7 +1245,7 @@ footer{
     a("</section>")
 
     # --- Glossary ---
-    a("<section><h2><span class='num'>9</span>Glossary</h2>")
+    h2("Glossary")
     rows = [[term, meaning] for term, meaning in [
         ("DMA", "Daily moving average — average closing price over N days."),
         ("RSI", "Momentum gauge 0–100. Above 70 stretched, below 30 washed out."),

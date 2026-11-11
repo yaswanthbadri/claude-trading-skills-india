@@ -8,10 +8,11 @@ Pipeline:
 
 Modes:
     --mode intraday   hourly bulletin during the session (default)
-    --mode daily      pre-market brief, every day
+    --mode daily      morning plan, 09:00 on trading days
     --mode eod        closing wrap after the bell
 
-Intraday and eod runs skip exchange holidays. Daily runs always fire.
+Every mode skips exchange holidays and weekends (override with --force), so
+nothing is pushed on a day the market is shut.
 
 Usage:
     python3 tools/daily_bulletin.py
@@ -33,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import bulletin_data
 import bulletin_render
 import market_calendar as cal
+import recs
 
 REPO = Path(__file__).resolve().parents[1]
 REPORTS = REPO / "reports"
@@ -50,10 +52,9 @@ def main() -> int:
                     help="run even on a market holiday")
     args = ap.parse_args()
 
-    if args.mode in ("intraday", "eod") and not args.force:
-        if not cal.is_trading_day():
-            print(f"{datetime.now():%Y-%m-%d} is not an NSE trading day — skipping {args.mode} run.")
-            return 0
+    if not args.force and not cal.is_trading_day():
+        print(f"{datetime.now():%Y-%m-%d} is not an NSE trading day — skipping {args.mode} run.")
+        return 0
 
     REPORTS.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
@@ -66,6 +67,19 @@ def main() -> int:
         candidates=args.candidates,
     )
     data["mode"] = args.mode
+
+    # ---- accountability: store today's calls, then grade every open one ----
+    # Only the morning plan and the closing wrap publish a new set of calls.
+    # Hourly intraday runs grade the book but must not rewrite the day's plans.
+    try:
+        if args.mode in ("daily", "eod"):
+            recs.record(data)
+        recs.evaluate()
+        data["scorecard"] = recs.scorecard()
+        data["focus"] = recs.focus_list(data, data["scorecard"])
+    except Exception as e:
+        data["scorecard"] = None
+        print(f"[warn] recommendation tracking failed: {e}", file=sys.stderr)
 
     md_path = REPORTS / f"{stem}.md"
     html_path = REPORTS / f"{stem}.html"

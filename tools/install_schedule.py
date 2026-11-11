@@ -3,9 +3,10 @@
 
 Jobs
     com.tradingskills.intraday   hourly bulletin, 09:15-15:15, Mon-Fri
-    com.tradingskills.eod        closing wrap, 15:45, Mon-Fri
-    com.tradingskills.daily      pre-market brief, 08:00, every day
+    com.tradingskills.daily      morning plan, 09:00, Mon-Fri
+    com.tradingskills.eod        closing review, 16:00, Mon-Fri
     com.tradingskills.alerts     news + price alerts, every 5 minutes, 24x7
+    com.tradingskills.cache      candle cache refresh, hourly + post-close
 
 Holiday handling is inside the scripts, not here (a holiday list changes).
 
@@ -87,15 +88,16 @@ def build_plists() -> dict[str, str]:
         + FOOTER
     )
 
-    eod_entries = [{"Weekday": d, "Hour": 15, "Minute": 45} for d in WEEKDAYS]
+    eod_entries = [{"Weekday": d, "Hour": 16, "Minute": 0} for d in WEEKDAYS]
     plists["com.tradingskills.eod"] = (
         _base("com.tradingskills.eod", "daily_bulletin.py", ["--mode", "eod"])
         + _calendar(eod_entries)
         + FOOTER
     )
 
-    # Every day, all 7 weekdays.
-    daily_entries = [{"Weekday": d, "Hour": 8, "Minute": 0} for d in range(0, 7)]
+    # The morning plan, 09:00 weekdays, 15 minutes before the open. The scripts
+    # themselves skip holidays; launchd only handles the clock.
+    daily_entries = [{"Weekday": d, "Hour": 9, "Minute": 0} for d in WEEKDAYS]
     plists["com.tradingskills.daily"] = (
         _base("com.tradingskills.daily", "daily_bulletin.py", ["--mode", "daily"])
         + _calendar(daily_entries)
@@ -110,10 +112,14 @@ def build_plists() -> dict[str, str]:
         + FOOTER
     )
 
-    # Candle cache: hourly at :00 so the :15 bulletin scans today's bars, plus a
-    # final pass after the close.
-    cache_entries = ([{"Weekday": d, "Hour": h, "Minute": 0} for d in WEEKDAYS
-                      for h in range(9, 16)]
+    # Candle cache: 08:50 before the morning plan, hourly at :00 so the :15
+    # bulletin scans today's bars, 15:40 once the close is in (the 16:00 review
+    # needs the full session), and 19:30 as a backstop.
+    cache_entries = ([{"Weekday": d, "Hour": 8, "Minute": 50} for d in WEEKDAYS]
+                     + [{"Weekday": d, "Hour": 9, "Minute": 10} for d in WEEKDAYS]
+                     + [{"Weekday": d, "Hour": h, "Minute": 0} for d in WEEKDAYS
+                        for h in range(10, 16)]
+                     + [{"Weekday": d, "Hour": 15, "Minute": 40} for d in WEEKDAYS]
                      + [{"Weekday": d, "Hour": 19, "Minute": 30} for d in WEEKDAYS])
     plists["com.tradingskills.cache"] = (
         _base("com.tradingskills.cache", "build_cache.py", [])

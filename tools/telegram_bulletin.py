@@ -301,6 +301,58 @@ def msg_deep(d: dict) -> str:
     return "\n".join(out)
 
 
+def msg_calls(d: dict) -> str:
+    """Accountability card: how our published calls actually did."""
+    card = d.get("scorecard") or {}
+    if not card.get("attempted"):
+        pend = card.get("pending_count") or 0
+        if not pend:
+            return ""
+        return ("📋 <b>How our calls did</b>\n"
+                f"<i>{pend} plan(s) on the book, none graded yet.</i>\n\n"
+                "Verdicts start after the next close — including triggers that never fill.")
+    out = ["📋 <b>How our calls did</b>",
+           f"<i>last {card['sessions_window']} sessions</i>",
+           ""]
+    out.append(f"Filled <b>{card['fills']}/{card['attempted']}</b> triggers "
+               f"({card['fill_rate_pct']:.0f}%)")
+    if card.get("decided"):
+        out.append(f"Hit a target <b>{card['wins']}/{card['decided']}</b> "
+                   f"({card['hit_rate_pct']:.0f}%)")
+    out.append(f"Average <b>{card['avg_r']:+.1f}R</b> · total "
+               f"{card['total_r']:+.1f}R" if card.get("avg_r") is not None else "")
+
+    closed = card.get("closed_rows") or []
+    if closed:
+        out.append("")
+        out.append("<b>Closed today</b>")
+        for r in closed[:6]:
+            rtxt = f"{r['r']:+.1f}R" if r.get("r") is not None else "—"
+            out.append(f"  {esc(r['symbol'])} · {esc(_calls_status(r['status']))} · {rtxt}")
+    open_rows = card.get("open_rows") or []
+    if open_rows:
+        out.append("")
+        out.append("<b>Open</b>")
+        for r in open_rows[:6]:
+            rtxt = f"{r['r']:+.1f}R" if r.get("r") is not None else "—"
+            out.append(f"  {esc(r['symbol'])} · entry {n(r.get('fill_price') or r.get('entry'))}"
+                       f" · now {rtxt}")
+
+    focus = d.get("focus") or []
+    if focus:
+        out.append("")
+        out.append("<b>Next session</b>")
+        for f in focus[:4]:
+            out.append(f"• {esc(f)}")
+    return "\n".join(x for x in out if x != "")
+
+
+def _calls_status(s: str) -> str:
+    return {"t2_hit": "T2 hit", "t1_hit": "T1 hit, runner on", "stopped": "stopped",
+            "no_fill": "never triggered", "expired": "expired",
+            "filled": "open"}.get(s, s)
+
+
 def build_messages(d: dict, docs: bool = True) -> list[str]:
     msgs = [msg_overview(d)]
     sectors = msg_sectors(d)
@@ -326,6 +378,13 @@ def build_messages(d: dict, docs: bool = True) -> list[str]:
     deep_msg = msg_deep(d)
     if deep_msg:
         msgs.append(deep_msg)
+
+    # Accountability only on the morning plan and the closing wrap; an hourly
+    # bulletin repeating the same scorecard is noise.
+    if d.get("mode") in ("daily", "eod"):
+        calls_msg = msg_calls(d)
+        if calls_msg:
+            msgs.append(calls_msg)
 
     if not plans:
         msgs.append("🚫 <b>No tradable setup right now.</b>\n"
