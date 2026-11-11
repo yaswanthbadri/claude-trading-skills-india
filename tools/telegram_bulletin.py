@@ -1,0 +1,336 @@
+#!/usr/bin/env python3
+"""Send the latest bulletin to Telegram as clean, readable messages.
+
+Messages are built from the structured JSON written by daily_bulletin.py — no
+fixed-width CLI tables are sent. Telegram has no table support, so each item is
+rendered as a compact multi-line card that stays readable on a phone.
+
+Also attaches the styled HTML report for desktop viewing.
+
+Usage:
+    python3 tools/telegram_bulletin.py                       # latest bulletin
+    python3 tools/telegram_bulletin.py --file reports/bulletin_2026-11-11_1910.md
+    python3 tools/telegram_bulletin.py --no-docs             # messages only
+"""
+from __future__ import annotations
+
+import argparse
+import glob
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+import requests
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+REPORTS_DIR = REPO_ROOT / "reports"
+ENV_FILE = REPO_ROOT / ".env"
+API_BASE = "https://api.telegram.org/bot{token}"
+MAX_LEN = 3900
+
+QUAD_EMOJI = {"Leading": "🟢", "Improving": "🔵", "Weakening": "🟡", "Lagging": "🔴"}
+
+
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+def load_env() -> None:
+    if ENV_FILE.exists():
+        for line in ENV_FILE.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+
+def n(v, digits=2):
+    if v is None:
+        return "—"
+    try:
+        return f"{float(v):,.{digits}f}"
+    except (TypeError, ValueError):
+        return str(v)
+
+
+def pct(v, digits=2, signed=True):
+    if v is None:
+        return "—"
+    return f"{v:+.{digits}f}%" if signed else f"{v:.{digits}f}%"
+
+
+def money(v, digits=0):
+    return "—" if v is None else "₹" + n(v, digits)
+
+
+def esc(s) -> str:
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def latest_bulletin() -> Path:
+    files = (glob.glob(str(REPORTS_DIR / "bulletin_*.md"))
+             + glob.glob(str(REPORTS_DIR / "daily_bulletin_*.md")))
+    if not files:
+        raise SystemExit("No bulletin_*.md found in reports/")
+    return Path(max(files, key=lambda f: Path(f).stat().st_mtime))
+
+
+# ---------------------------------------------------------------------------
+# telegram transport
+# ---------------------------------------------------------------------------
+def send_message(token: str, chat_id: str, text: str) -> None:
+    url = API_BASE.format(token=token) + "/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+    last = None
+    for attempt in range(4):
+        try:
+            r = requests.post(url, json=payload, timeout=30)
+            if r.status_code == 400 and "parse entities" in r.text:
+                # Fall back to plain text rather than dropping the message.
+                payload.pop("parse_mode", None)
+                payload["text"] = text.replace("<b>", "").replace("</b>", "").replace(
+                    "<i>", "").replace("</i>", "")
+                r = requests.post(url, json=payload, timeout=30)
+            r.raise_for_status()
+            return
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            time.sleep(2 + attempt * 3)
+    raise SystemExit(f"Telegram sendMessage failed after retries: {last}")
+
+
+def send_document(token: str, chat_id: str, path: Path, caption: str) -> None:
+    url = API_BASE.format(token=token) + "/sendDocument"
+    last = None
+    for attempt in range(4):
+        try:
+            with path.open("rb") as f:
+                r = requests.post(
+                    url,
+                    data={"chat_id": chat_id, "caption": caption[:1024]},
+                    files={"document": (path.name, f, "text/html")},
+                    timeout=60,
+                )
+            r.raise_for_status()
+            return
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            time.sleep(2 + attempt * 3)
+    print(f"[warn] document upload failed: {last}", file=sys.stderr)
+
+
+def send_all(token, chat_id, chunks):
+    """Send a list of messages, stopping a message before Telegram's limit."""
+    for chunk in chunks:
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        send_message(token, chat_id, chunk[:MAX_LEN])
+
+
+# ---------------------------------------------------------------------------
+# message builders
+# ---------------------------------------------------------------------------
+def msg_overview(d: dict) -> str:
+    idx, reg = d["index"], d["regime"]
+    label = (reg.get("label") or "").lower()
+    if "confirmed" in label:
+        dot, line = "🟢", ("Green light. Take valid breakouts and pullbacks at normal size — "
+                           "but only in Stage-2 leaders with a defined pivot.")
+    elif "pressure" in label:
+        dot, line = "🟡", "Amber. Halve position size, tighten stops, bank profits sooner."
+    else:
+        dot, line = "🔴", "Red. Raise cash, no fresh leverage, A-grade setups only."
+
+    stamp = d["generated_at"][:16].replace("T", " ")
+    mode = d.get("mode", "intraday")
+    heading = {"daily": "Pre-market Brief", "eod": "Closing Wrap"}.get(
+        mode, "Market Bulletin")
+    vix = d.get("vix")
+    vix_tag = ("calm" if vix and vix < 12 else "normal" if vix and vix < 18
+               else "stressed" if vix and vix < 25 else "panic")
+    rsi_note = ""
+    try:
+        if float(str(idx["rsi"]).split()[0]) >= 70:
+            rsi_note = "\n<i>RSI is stretched — prefer pullbacks over chasing.</i>"
+    except (ValueError, IndexError):
+        pass
+    cal = d.get("calendar") or {}
+    closed_note = ""
+    if not cal.get("trading_day", True):
+        nxt = cal.get("next_trading_day")
+        closed_note = ("\n⚠️ <i>Exchange closed today — prices are from the last session."
+                       + (f" Next session: {esc(nxt)}." if nxt else "")
+                       + "</i>")
+    return (
+        f"📊 <b>{heading} — India</b>\n"
+        f"<i>{esc(stamp)} IST</i>{closed_note}\n"
+        f"───────────────\n"
+        f"<b>NIFTY 50</b>  {n(idx['close'])}  ({pct(idx['change_pct'])})\n"
+        f"<b>India VIX</b>  {n(vix)}  · {vix_tag}\n"
+        f"<b>Regime</b>  {esc(reg['label'])}  · risk {reg['risk_score']}/100\n"
+        f"<b>Exposure</b>  up to {reg['exposure_pct']}% · max {reg['max_positions']} new positions\n"
+        f"<b>RSI</b> {esc(str(idx['rsi']))}  ·  <b>ADX</b> {esc(str(idx['adx']))}\n"
+        f"<b>52W range</b>  {n(idx['low_52w'])} – {n(idx['high_52w'])}\n"
+        f"───────────────\n"
+        f"{dot} {esc(line)}{rsi_note}"
+    )
+
+
+def msg_sectors(d: dict) -> str:
+    rows = d.get("sectors", {}).get("rows") or []
+    if not rows:
+        return ""
+    buckets = {"Leading": [], "Improving": [], "Weakening": [], "Lagging": []}
+    for s in rows:
+        buckets.setdefault(s.get("quadrant") or "Lagging", []).append(s.get("key"))
+    out = ["🏭 <b>Sector rotation</b>", ""]
+    for q in ("Leading", "Improving", "Weakening", "Lagging"):
+        names = buckets.get(q) or []
+        if names:
+            out.append(f"{QUAD_EMOJI[q]} <b>{q}</b>: {esc(', '.join(names))}")
+    rot = d["sectors"].get("rotation") or {}
+    if rot.get("tilt"):
+        out.append("")
+        out.append(f"<i>Tilt: {esc(rot['tilt'])} — {esc(rot.get('reason', ''))}</i>")
+    sr = d["sectors"].get("size_read") or {}
+    if sr.get("read"):
+        out.append(f"<i>Size: {esc(sr['read'])} — {esc(sr.get('reason', ''))}</i>")
+    return "\n".join(out)
+
+
+def msg_movers(d: dict) -> str:
+    movers = d.get("momentum", {}).get("movers") or []
+    if not movers:
+        return ""
+    out = ["⚡ <b>Momentum movers</b>",
+           f"<i>scanned {d['momentum'].get('scanned', 0)} NSE names</i>", ""]
+    for m in movers[:6]:
+        sig = "; ".join(m["signals"]) if m.get("signals") else "—"
+        out.append(
+            f"<b>{esc(m['symbol'])}</b>  {n(m['close'])}  · RS {m['rs']}  · "
+            f"{pct(m['from_high'], 1)} from 52W high\n"
+            f"   <i>{esc(sig)}</i>"
+        )
+    return "\n".join(out)
+
+
+def msg_plan(p: dict) -> str:
+    fp = p.get("from_pivot_pct")
+    if fp is not None and fp > 1.5:
+        verdict = "🚫 MISSED — already above the chase limit"
+    elif p["stage2"] and (fp is None or fp >= -4):
+        verdict = "✅ BUY-READY — Stage 2, near pivot"
+    elif (p.get("tt_passed") or 0) >= 5:
+        verdict = "👀 WATCH — 5/6 trend, wait for confirmation"
+    else:
+        verdict = "👀 WATCH ONLY — not Stage 2, paper-trade at best"
+
+    lines = [
+        f"🎯 <b>{esc(p['symbol'])}</b>   · {esc(p['base_type'] or '')} {esc(p['base_grade'] or '')} base",
+        f"<i>{verdict}</i>",
+        f"<i>close {n(p['close'])} · pivot {n(p['pivot'])} ({pct(p['from_pivot_pct'])})</i>",
+        "",
+        f"<b>Buy above</b>  {n(p['trigger'])}",
+        f"<i>limit {n(p['limit'])} — never pay more</i>",
+        f"<b>Stop</b>  {n(p['stop'])}  ({pct(-(p['stop_pct'] or 0))}, {esc(p['stop_method'] or '')})",
+    ]
+    for i, t in enumerate((p.get("targets") or [])[:2], 1):
+        lines.append(f"<b>Target {i}</b>  {n(t['price'])}  "
+                     f"({pct(t['pct'], 1)} · {int(t['r'])}R · net {money(t['net'])})")
+    lines += [
+        "",
+        f"<i>{p['qty']} shares · {money(p['position_value'])} "
+        f"({pct(p['allocation_pct'], 1, signed=False)} of capital) · "
+        f"risk {money(p['risk_if_stopped'])} of {money(p['risk_budget'])}</i>",
+    ]
+    for w in (p.get("warnings") or [])[:2]:
+        lines.append(f"⚠ {esc(w)}")
+    return "\n".join(lines)
+
+
+def msg_headlines(d: dict) -> str:
+    hs = d.get("headlines") or []
+    out = ["📰 <b>Headlines</b>", ""]
+    for h in hs[:6]:
+        out.append(f"• <a href=\"{esc(h['url'])}\">{esc(h['title'])}</a>")
+    out += ["", "<i>Educational analysis only — not SEBI-registered advice.</i>"]
+    return "\n".join(out)
+
+
+def build_messages(d: dict, docs: bool = True) -> list[str]:
+    msgs = [msg_overview(d)]
+    sectors = msg_sectors(d)
+    movers = msg_movers(d)
+    if sectors or movers:
+        msgs.append("\n\n".join(x for x in (sectors, movers) if x))
+
+    plans = d.get("plans") or []
+    ready = [p for p in plans if p.get("stage2") and
+             (p.get("from_pivot_pct") is None or p["from_pivot_pct"] <= 1.5)]
+    if plans and not ready:
+        msgs.append("⚠️ <b>No A-grade setup today.</b>\n"
+                    "<i>None of the candidates below clears every Stage-2 check. "
+                    "Treat these as watchlist cards, not orders.</i>")
+    elif ready:
+        msgs.append(f"✅ <b>{len(ready)} buy-ready setup{'s' if len(ready) > 1 else ''}.</b>\n"
+                    "<i>Passes the Stage-2 trend check and sits near the pivot. "
+                    "Risk 1–2% per trade, stop first.</i>")
+
+    for p in plans[:3]:
+        msgs.append(msg_plan(p))
+
+    if not plans:
+        msgs.append("🚫 <b>No tradable setup right now.</b>\n"
+                    "<i>Forcing a trade in a thin tape is how accounts die. "
+                    "Wait for a pivot with volume.</i>")
+
+    msgs.append(msg_headlines(d))
+    return msgs
+
+
+def main() -> int:
+    load_env()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--file", type=Path, default=None)
+    ap.add_argument("--no-docs", action="store_true")
+    args = ap.parse_args()
+
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        print("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID.", file=sys.stderr)
+        return 2
+
+    md_path = args.file or latest_bulletin()
+    if not md_path.exists():
+        print(f"File not found: {md_path}", file=sys.stderr)
+        return 1
+
+    json_path = md_path.with_suffix(".json")
+    if json_path.exists():
+        data = json.loads(json_path.read_text())
+        send_all(token, chat_id, build_messages(data))
+    else:
+        # Legacy fallback: send the markdown as one plain message.
+        send_message(token, chat_id, esc(md_path.read_text())[:MAX_LEN])
+
+    if not args.no_docs:
+        html_path = md_path.with_suffix(".html")
+        if html_path.exists():
+            send_document(token, chat_id, html_path,
+                          "Full report (styled HTML — best on desktop)")
+
+    print(f"Sent {md_path.name} to chat {chat_id}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
