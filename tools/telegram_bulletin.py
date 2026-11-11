@@ -265,6 +265,42 @@ def msg_headlines(d: dict) -> str:
     return "\n".join(out)
 
 
+def msg_deep(d: dict) -> str:
+    """The 100% club as one compact message."""
+    deep = d.get("deep") or {}
+    cands = deep.get("candidates") or []
+    if not cands:
+        return ""
+    out = ["🎯 <b>The 100% Club</b>",
+           "<i>Structural doublers, not forecasts. Full analysis in the attached report.</i>",
+           ""]
+    for c in cands[:3]:
+        p = c["plan"]
+        s = c.get("study") or {}
+        if s.get("samples") and s.get("hit100"):
+            ev = (f"{s['hit100']} of {s['samples']} similar setups doubled"
+                  + (f" in ~{round((s.get('median_bars_to_100') or 0) / 21)} months"
+                     if s.get("median_bars_to_100") else ""))
+        elif s.get("samples"):
+            ev = f"0 of {s['samples']} similar setups doubled in 10 years"
+        else:
+            ev = "no comparable setup in its history"
+        out.append(
+            f"<b>{esc(c['symbol'])}</b>  · grade {esc(c['grade'])} {c['score']:.0f}/100  · "
+            f"RS {c.get('rs_rating') or '—'}\n"
+            f"   Entry <b>{n(p['entry'])}</b> · SL <b>{n(p['stop'])}</b> "
+            f"({n(abs(p.get('stop_pct') or 0), 1)}%)\n"
+            f"   T1 {n(p.get('t1'))} ({pct(p.get('t1_pct'), 0)}) · "
+            f"T2 {n(p.get('t2'))} ({pct(p.get('t2_pct'), 0)})\n"
+            f"   +100% = <b>{n(p.get('hundred'))}</b> · {n(p.get('r_to_100'), 0)}R · "
+            f"{p.get('qty')} sh\n"
+            f"   <i>{esc(ev)}</i>"
+        )
+    out.append("")
+    out.append("<i>A 100% target is an objective, not a promise.</i>")
+    return "\n".join(out)
+
+
 def build_messages(d: dict, docs: bool = True) -> list[str]:
     msgs = [msg_overview(d)]
     sectors = msg_sectors(d)
@@ -286,6 +322,10 @@ def build_messages(d: dict, docs: bool = True) -> list[str]:
 
     for p in plans[:3]:
         msgs.append(msg_plan(p))
+
+    deep_msg = msg_deep(d)
+    if deep_msg:
+        msgs.append(deep_msg)
 
     if not plans:
         msgs.append("🚫 <b>No tradable setup right now.</b>\n"

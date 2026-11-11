@@ -333,6 +333,37 @@ def collect(capital: float = 500_000, risk_pct: float = 1.0,
     data["params"] = {"capital": capital, "risk_pct": risk_pct,
                       "watchlist": WATCHLIST, "candidates": candidates}
 
+    # ---- deep "path to 100%" analysis ---------------------------------------
+    # Runs on the same scan (no second bulk download) and adds each candidate's
+    # own-history doubling base rate, multi-timeframe and level detail.
+    try:
+        import deep_candidates as dc
+
+        raw_setups = bo.get("results") or []
+        pool_syms = [r["name"] for r in raw_setups
+                     if ((r.get("trend_template") or {}).get("stage2")
+                         or ((r.get("trend_template") or {}).get("passed") or 0) >= 5)]
+        rs_map = {}
+        if pool_syms:
+            # Rating must come from a wide universe — a percentile within three
+            # names is meaningless (it would read 1, 50, 99).
+            rs_json = _run_json(
+                [PYTHON, str(SK / "momentum-scanner" / "scripts" / "momentum.py"),
+                 "rs", "--symbols", WATCHLIST, "--benchmark", "NIFTY",
+                 "--json"], timeout=420) or {}
+            rs_map = {x.get("symbol"): x.get("rating")
+                      for x in (rs_json.get("ratings") or [])}
+
+        data["deep"] = dc.analyse(
+            raw_setups,
+            {p["symbol"]: p for p in plans},
+            capital=capital, risk_pct=risk_pct, top_n=4,
+            regime_label=data["regime"].get("label", ""),
+            rs_ratings=rs_map,
+        )
+    except Exception as e:  # never let this section break the bulletin
+        data["deep"] = {"candidates": [], "note": f"deep analysis unavailable: {e}"}
+
     # ---- headlines ----------------------------------------------------------
     data["headlines"] = _headlines()
     return data

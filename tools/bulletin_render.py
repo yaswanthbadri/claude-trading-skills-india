@@ -43,6 +43,16 @@ def _pct(v, digits=2, signed=True):
     return s
 
 
+def _b(text: str) -> str:
+    """Escape, then turn **bold** markers into <b> tags."""
+    t = _h.escape(str(text))
+    while "**" in t:
+        t = t.replace("**", "<b>", 1)
+        if "**" in t:
+            t = t.replace("**", "</b>", 1)
+    return t
+
+
 def _closed_note_md(d: dict) -> str:
     cal = d.get("calendar") or {}
     if cal.get("trading_day", True):
@@ -87,6 +97,189 @@ def plan_verdict(p: dict) -> tuple[str, str]:
     if (p.get("tt_passed") or 0) >= 5 and (fp is None or fp >= -4):
         return "WATCH — 5/6 trend", "warn"
     return "WATCH ONLY — not Stage 2", "warn"
+
+
+# ---------------------------------------------------------------------------
+# 100% club — shared narrative
+# ---------------------------------------------------------------------------
+def _study_sentence(c: dict) -> str:
+    """Plain-language summary of the stock's own doubling base rate."""
+    s = c.get("study") or {}
+    n = s.get("samples") or 0
+    if not n:
+        return ("No comparable Stage-2 setup in this stock's history — there is no base rate "
+                "to quote, so size this one smaller than the others.")
+    years = int(s.get("history_years") or max(1, round(n * 63 / 252)))
+    h50, h100 = s.get("hit50") or 0, s.get("hit100") or 0
+    r50 = s.get("rate50_pct")
+    r100 = s.get("rate100_pct")
+    bars = s.get("median_bars_to_100")
+    worst = s.get("worst_fwd_pct")
+
+    head = (f"In {n} comparable setups over roughly {years} years it gained 50%+ in "
+            f"{h50} ({r50:.0f}%) and 100%+ in {h100} ({r100:.0f}%).")
+    if bars:
+        head += f" Median time to double: about {round(bars / 21)} months."
+    elif not h100:
+        head += " It has never doubled within a year from a setup like this."
+    if worst is not None:
+        head += f" Worst drawdown along the way: {worst:.0f}%."
+    head += " Small sample from one stock's own tape — context, not a probability."
+    return head
+
+
+def _why_bullets(c: dict) -> list[str]:
+    b = c.get("base") or {}
+    p = c.get("plan") or {}
+    out = []
+    if c.get("structure") == "breakout":
+        out.append(f"**{b.get('type')} base, grade {b.get('grade')}** — {_n(b.get('weeks'), 1)} "
+                   f"weeks, {_n(b.get('depth_pct'), 1)}% deep, "
+                   f"{b.get('contractions')} contraction(s). Pivot {_n(b.get('pivot'))}, "
+                   f"price {_pct(b.get('from_pivot_pct'))} from it.")
+    else:
+        out.append("**No usable base right now** — this is a trend-continuation entry: buy the "
+                   "pullback toward the 20-day average, stop under the 50-day. Lower quality than "
+                   "a clean breakout.")
+
+    tt = f"{c.get('tt_passed')}/{c.get('tt_total')}"
+    age = c.get("stage2_age_months")
+    age_txt = (f"the advance is {age:.0f} months old" if age else "the advance age is unclear")
+    out.append(f"**Stage-2 checklist {tt}**, RS rating {c.get('rs_rating') or 'n/a'}, "
+               f"{age_txt}. Most doublers come from the first 18 months of a Stage-2 run, "
+               "not the fifth year.")
+
+    wk = c.get("weekly") or {}
+    out.append(f"**Weekly trend is {wk.get('label')}** — {wk.get('detail')}.")
+
+    if c.get("support") or c.get("resistance"):
+        out.append(f"**Levels:** support {', '.join(_n(x, 0) for x in c.get('support') or []) or 'n/a'} · "
+                   f"resistance {', '.join(_n(x, 0) for x in c.get('resistance') or []) or 'n/a'}.")
+
+    if c.get("extended"):
+        out.append(f"**Stretched right now** — RSI {_n(c.get('rsi'), 1)}. Buying here means "
+                   "paying up; the limit order below is the disciplined entry.")
+    else:
+        out.append(f"**Not stretched** — RSI {_n(c.get('rsi'), 1)}, ATR {_n(c.get('atr_pct'), 1)}% "
+                   "of price, so the stop distance is realistic for a swing.")
+
+    vd = b.get("volume_dryup")
+    if vd:
+        out.append(f"**Volume dry-up ratio {_n(vd, 2)}** — "
+                   + ("supply is drying up inside the base, which is what you want."
+                      if vd <= 1.0 else
+                      "volume is still above the base average, so sellers are not gone yet."))
+    return out
+
+
+def _what_breaks_it(c: dict) -> list[str]:
+    p = c.get("plan") or {}
+    out = [f"A close below **{_n(p.get('stop'))}** voids the idea — that is "
+           f"{_n(abs(p.get('stop_pct') or 0), 1)}% below entry, and the whole thesis goes with it, "
+           "not just the price."]
+    if c.get("structure") == "breakout":
+        out.append("A breakout on volume below ~1.5× the 50-day average usually fails within days.")
+    out.append("Results, a block deal or an ASM/GSM listing inside the hold window can gap the "
+               "stock straight through the stop — check the calendar before you size.")
+    out.append("A market regime flip to correction (distribution days piling up, Nifty under the "
+               "50-day) cuts every long. Halve size or stand aside.")
+    if c.get("extended"):
+        out.append("Extended RSI means the first pullback can be violent; expect to sit through it.")
+    return out
+
+
+def _ladder_rows(c: dict) -> list[list[str]]:
+    p = c.get("plan") or {}
+    lad = p.get("ladder")
+    if not lad:
+        return []
+    return [
+        ["T1", str(lad["third"]), _n(p.get("t1")), _pct(p.get("t1_pct"), 1), _money(lad["net_at_t1"])],
+        ["T2", str(lad["third"]), _n(p.get("t2")), _pct(p.get("t2_pct"), 1), _money(lad["net_at_t2"])],
+        ["+100%", str(lad["runner"]), _n(p.get("hundred")), "+100.0%", _money(lad["net_at_100"])],
+        ["**Total**", str(lad["qty"]), "—", f"**{_pct(lad['pct_of_capital'], 1, signed=False)} of capital**",
+         f"**{_money(lad['net_total'])}**"],
+    ]
+
+
+def _deep_md(d: dict) -> list[str]:
+    deep = d.get("deep") or {}
+    cands = deep.get("candidates") or []
+    L = ["## 6. The 100% Club — the path to doubling", ""]
+    L.append("> **Read this first.** No setup guarantees a 100% gain, and anyone who says "
+             "otherwise is selling something. This section shows the three things that actually "
+             "decide a doubler: the structure, the stock's own history of doubling from a "
+             "similar setup, and the arithmetic of a defined-risk ladder. A 100% target is an "
+             "objective you manage toward, not a forecast.")
+    L.append("")
+    if not cands:
+        L.append(f"_{deep.get('note') or 'No candidate cleared the screen today.'}_")
+        L.append("")
+        return L
+
+    L.append(f"Screened {deep.get('screened', 0)} names · {deep.get('pool', 0)} passed the "
+             f"trend filter · showing the best {len(cands)}.")
+    L.append("")
+    for i, c in enumerate(cands, 1):
+        p = c.get("plan") or {}
+        b = c.get("base") or {}
+        L.append(f"### {i}. {c['symbol']} — grade {c['grade']} · "
+                 f"{c['score']:.0f}/100 · RS {c.get('rs_rating') or 'n/a'}")
+        L.append("")
+        L.append(f"_{b.get('type') or 'no base'} {b.get('grade') or ''} · "
+                 f"{_n(b.get('weeks'), 1)} weeks · {c.get('structure')} entry · "
+                 f"₹{_n(c.get('liquidity_cr'), 0)} crore/day_")
+        L.append("")
+        L.append("| Level | Price | From entry |")
+        L.append("|---|---|---|")
+        L.append(f"| Entry (buy above) | {_n(p.get('entry'))} | — |")
+        if p.get("limit"):
+            L.append(f"| Chase limit (max) | {_n(p.get('limit'))} | "
+                     f"{_pct(100 * (p['limit'] / p['entry'] - 1), 1)} |")
+        L.append(f"| **Stop loss** | **{_n(p.get('stop'))}** | {_pct(-(p.get('stop_pct') or 0))} |")
+        if p.get("t1"):
+            L.append(f"| Target 1 (2R) | {_n(p.get('t1'))} | {_pct(p.get('t1_pct'), 1)} |")
+        if p.get("t2"):
+            L.append(f"| Target 2 ({p.get('t2_driver')}) | {_n(p.get('t2'))} | "
+                     f"{_pct(p.get('t2_pct'), 1)} |")
+        L.append(f"| **100% objective** | **{_n(p.get('hundred'))}** | **+100%** |")
+        L.append("")
+        L.append(f"Size **{p.get('qty')} shares** · {_money(p.get('position_value'))} deployed · "
+                 f"risk if stopped {_money(p.get('risk_if_stopped'))} · "
+                 f"charges about {_money(p.get('charges'))} · "
+                 f"**{_n(p.get('r_to_100'), 0)}R to double**.")
+        L.append("")
+        L.append("**Why this one**")
+        L.append("")
+        for w in _why_bullets(c):
+            L.append(f"- {w}")
+        L.append("")
+        L.append("**Evidence from its own history**")
+        L.append("")
+        L.append(_study_sentence(c))
+        L.append("")
+        rows = _ladder_rows(c)
+        if rows:
+            L.append("**The ladder** — book a third at each target, trail the runner to +100%")
+            L.append("")
+            L.append("| Leg | Shares | Exit price | Move | Net ₹ |")
+            L.append("|---|---|---|---|---|")
+            for r in rows:
+                L.append("| " + " | ".join(r) + " |")
+            lad = p.get("ladder")
+            L.append("")
+            L.append(f"If all three legs work: **{_money(lad['net_total'])}**, about "
+                     f"{_pct(lad['pct_of_capital'], 1, signed=False)} of capital, "
+                     f"{_n(lad['blended_r'], 1)}R blended.")
+            L.append("")
+        L.append("**What breaks it**")
+        L.append("")
+        for w in _what_breaks_it(c):
+            L.append(f"- {w}")
+        L.append("")
+    L.append(f"> {deep.get('disclaimer', '')}")
+    L.append("")
+    return L
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +383,11 @@ def render_md(d: dict) -> str:
           f"{_pct(s['from_pivot_pct'])} | {_n(s['liquidity_cr'], 1)} |")
     a("")
 
-    a("## 5. Trade Plans")
+    L_deep = _deep_md(d)
+    for line in L_deep:
+        a(line)
+
+    a("## 7. Trade Plans")
     a("")
     a("### Plain English first")
     a("")
@@ -259,13 +456,13 @@ def render_md(d: dict) -> str:
         a(f"{i}. {item}")
     a("")
 
-    a("## 6. Headlines")
+    a("## 8. Headlines")
     a("")
     for h in d["headlines"]:
         a(f"- [{h['title']}]({h['url']})")
     a("")
 
-    a("## 7. Glossary")
+    a("## 9. Glossary")
     a("")
     a("| Term | Plain meaning |")
     a("|---|---|")
@@ -453,6 +650,22 @@ td.num,th.num{text-align:right}
 .lvl.entry{border-color:rgba(77,163,255,.35)}
 .lvl.stop{border-color:rgba(255,107,107,.32)}
 .lvl.t1,.lvl.t2{border-color:rgba(49,208,170,.3)}
+/* ---------- 100% club ---------- */
+.deep .lvls{grid-template-columns:repeat(3,1fr)}
+.lvl.hundred{border-color:rgba(255,200,87,.55);
+  background:linear-gradient(180deg,rgba(255,200,87,.10),rgba(255,200,87,.01))}
+.lvl.hundred .v{color:var(--amber)}
+.dhd{font-size:.7rem;letter-spacing:.09em;text-transform:uppercase;color:var(--dim);
+  font-weight:700;margin:16px 0 6px}
+.dgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}
+.dbox{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+.dbox .k{font-size:.68rem;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);font-weight:600}
+.dbox .v{font-size:.95rem;font-weight:700;margin-top:3px}
+.dbox .s{font-size:.74rem;color:var(--dim);margin-top:2px;line-height:1.45}
+@media (max-width:720px){
+  .deep .lvls{grid-template-columns:repeat(2,1fr)}
+  .dgrid{grid-template-columns:1fr}
+}
 .notes{margin-top:6px}
 .notes li{margin:5px 0 5px 18px;font-size:.86rem;color:#c2d0df}
 .notes li.warn{color:var(--amber)}
@@ -694,8 +907,89 @@ footer{
       "sits below the breakout level — closer is more actionable.</p>")
     a("</section>")
 
+    # --- 100% club ---
+    deep = d.get("deep") or {}
+    cands = deep.get("candidates") or []
+    a("<section><h2><span class='num'>6</span>The 100% Club</h2>")
+    a("<div class='callout'><b>No setup guarantees 100%.</b> Anyone who says otherwise is "
+      "selling something. What this section does is show the three things that actually decide "
+      "a doubler: the <b>structure</b>, the stock's own <b>history</b> of doubling from a "
+      "similar setup, and the <b>arithmetic</b> of a defined-risk ladder. A 100% target is an "
+      "objective you manage toward — never a forecast.</div>")
+
+    if not cands:
+        a(f"<p class='small'>{_h.escape(deep.get('note') or 'No candidate cleared the screen today.')}</p>")
+    else:
+        a(f"<p class='small'>Screened <b>{deep.get('screened', 0)}</b> names · "
+          f"<b>{deep.get('pool', 0)}</b> passed the trend filter (Stage 2 or 5/6) · showing the best "
+          f"<b>{len(cands)}</b>. Ranked by structure, relative strength, trend age, liquidity "
+          "and the stock's own doubling rate.</p>")
+
+        for c in cands:
+            p = c.get("plan") or {}
+            b = c.get("base") or {}
+            g = (c.get("grade") or "C").lower()
+            a("<div class='plan deep'>")
+            a(f"<div class='plan-head'><span class='name'>{_h.escape(c['symbol'])}</span>"
+              f"<span class='badge g-{g}'>Grade {_h.escape(c['grade'] or '')} · "
+              f"{c['score']:.0f}/100</span>"
+              f"<span class='badge'>Stage {c.get('tt_passed')}/{c.get('tt_total')}</span>"
+              f"<span class='badge'>RS {c.get('rs_rating') or 'n/a'}</span>"
+              f"<span class='meta'>{_h.escape(str(b.get('type') or 'no base'))} "
+              f"{_h.escape(str(b.get('grade') or ''))} · {_n(b.get('weeks'), 1)} weeks · "
+              f"{_h.escape(c.get('structure') or '')} entry · "
+              f"₹{_n(c.get('liquidity_cr'), 0)} crore/day</span></div>")
+            a("<div class='plan-body'><div class='lvls'>")
+            a(f"<div class='lvl entry'><div class='k'>Buy above</div>"
+              f"<div class='v'>{_n(p.get('entry'))}</div>"
+              f"<div class='s'>limit {_n(p.get('limit'))}</div></div>")
+            a(f"<div class='lvl stop'><div class='k'>Stop loss</div>"
+              f"<div class='v neg'>{_n(p.get('stop'))}</div>"
+              f"<div class='s'>{_pct(-(p.get('stop_pct') or 0))} · "
+              f"{_h.escape(str(p.get('stop_method') or ''))}</div></div>")
+            a(f"<div class='lvl t1'><div class='k'>Target 1 · 2R</div>"
+              f"<div class='v pos'>{_n(p.get('t1'))}</div>"
+              f"<div class='s'>{_pct(p.get('t1_pct'), 1)}</div></div>")
+            a(f"<div class='lvl t2'><div class='k'>Target 2 · {_h.escape(str(p.get('t2_driver') or '3R'))}</div>"
+              f"<div class='v pos'>{_n(p.get('t2'))}</div>"
+              f"<div class='s'>{_pct(p.get('t2_pct'), 1)}</div></div>")
+            a(f"<div class='lvl hundred'><div class='k'>+100% objective</div>"
+              f"<div class='v'>{_n(p.get('hundred'))}</div>"
+              f"<div class='s'>{_n(p.get('r_to_100'), 0)}R from entry</div></div>")
+            a(f"<div class='lvl'><div class='k'>Size / risk</div>"
+              f"<div class='v'>{p.get('qty')} sh</div>"
+              f"<div class='s'>{_money(p.get('position_value'))} · risk "
+              f"{_money(p.get('risk_if_stopped'))}</div></div>")
+            a("</div>")
+
+            a("<div class='dhd'>Why this one</div><ul class='notes'>")
+            for w in _why_bullets(c):
+                a(f"<li>{_b(w)}</li>")
+            a("</ul>")
+
+            a("<div class='dhd'>Evidence from its own history</div>")
+            a(f"<p class='small'>{_h.escape(_study_sentence(c))}</p>")
+
+            rows = _ladder_rows(c)
+            if rows:
+                a("<div class='dhd'>The ladder — a third at each target, trail the runner to +100%</div>")
+                a(_table(["Leg", "Shares", "Exit", "Move", "Net ₹"], rows))
+                lad = p.get("ladder")
+                a(f"<p class='small'>If all three legs work: <b>{_money(lad['net_total'])}</b>, "
+                  f"about <b>{_pct(lad['pct_of_capital'], 1, signed=False)} of capital</b>, "
+                  f"{_n(lad['blended_r'], 1)}R blended.</p>")
+
+            a("<div class='dhd'>What breaks it</div><ul class='notes'>")
+            for w in _what_breaks_it(c):
+                a(f"<li class='warn'>⚠ {_b(w)}</li>")
+            a("</ul>")
+            a("</div></div>")
+
+        a(f"<p class='small'>{_h.escape(deep.get('disclaimer') or '')}</p>")
+    a("</section>")
+
     # --- Plans ---
-    a("<section><h2><span class='num'>6</span>Trade plans</h2>")
+    a("<section><h2><span class='num'>7</span>Trade plans</h2>")
     ready = [p for p in d["plans"] if plan_verdict(p)[1] == "good"]
     if d["plans"] and not ready:
         a("<div class='callout warn'><b>No A-grade setup today.</b> "
@@ -775,7 +1069,7 @@ footer{
     a("</section>")
 
     # --- Headlines ---
-    a("<section><h2><span class='num'>7</span>Headlines</h2>")
+    a("<section><h2><span class='num'>8</span>Headlines</h2>")
     if d["headlines"]:
         a("<ul class='clean headlines'>")
         for h in d["headlines"]:
@@ -786,7 +1080,7 @@ footer{
     a("</section>")
 
     # --- Glossary ---
-    a("<section><h2><span class='num'>8</span>Glossary</h2>")
+    a("<section><h2><span class='num'>9</span>Glossary</h2>")
     rows = [[term, meaning] for term, meaning in [
         ("DMA", "Daily moving average — average closing price over N days."),
         ("RSI", "Momentum gauge 0–100. Above 70 stretched, below 30 washed out."),
@@ -800,6 +1094,9 @@ footer{
         ("OCO", "One-cancels-other: stop and target on the same position."),
         ("FII / DII", "Foreign and domestic institutional investors."),
         ("ASM / GSM", "NSE surveillance lists with extra margin and curbs."),
+        ("Base rate", "How often this actually happened before, counted from the stock's own history."),
+        ("Ladder", "Selling in tranches (1/3 at T1, 1/3 at T2, trail the rest) instead of one exit."),
+        ("+100% objective", "The price equal to twice your entry. An objective, never a forecast."),
     ]]
     a(_table(["Term", "Plain meaning"], rows))
     a("</section>")
