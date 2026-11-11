@@ -16,3 +16,8 @@ venv/
 # Local launch notes (never pushed)
 LAUNCH_KIT.md
 launch/
+
+# Local market data cache (rebuilt by tools/build_cache.py)
+data/candles/
+data/nifty.csv
+data/cache_state.json

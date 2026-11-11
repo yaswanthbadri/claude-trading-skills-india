@@ -217,8 +217,8 @@ def _deep_md(d: dict) -> list[str]:
         L.append("")
         return L
 
-    L.append(f"Screened {deep.get('screened', 0)} names · {deep.get('pool', 0)} passed the "
-             f"trend filter · showing the best {len(cands)}.")
+    L.append(f"Screened {_n(deep.get('screened', 0), 0)} names · {deep.get('pool', 0)} passed "
+             f"the trend filter · showing the best {len(cands)}.")
     L.append("")
     for i, c in enumerate(cands, 1):
         p = c.get("plan") or {}
@@ -375,6 +375,10 @@ def render_md(d: dict) -> str:
 
     a("## 4. Breakout Setups")
     a("")
+    uni = d.get("universe") or {}
+    if uni.get("label"):
+        a(f"_Universe: {uni['label']}, last bar {uni.get('last_bar') or 'n/a'}._")
+        a("")
     a("| # | Stock | Close | Trend | Base | Grade | Pivot | From pivot | ₹cr/day |")
     a("|---|---|---|---|---|---|---|---|---|")
     for i, s in enumerate(d["breakouts"]["setups"][:12], 1):
@@ -891,6 +895,10 @@ footer{
 
     # --- Breakouts ---
     a("<section><h2><span class='num'>5</span>Breakout setups</h2>")
+    _uni = d.get("universe") or {}
+    if _uni.get("label"):
+        a(f"<p class='small'>Universe: <b>{_h.escape(str(_uni['label']))}</b> · last bar "
+          f"{_h.escape(str(_uni.get('last_bar') or 'n/a'))}.</p>")
     a("<p class='small'>Stage-2 trend template out of 6, base type and grade, the pivot, and how far "
       "price sits below it. Being close to the pivot is what makes a setup actionable.</p>")
     rows = []
@@ -920,7 +928,7 @@ footer{
     if not cands:
         a(f"<p class='small'>{_h.escape(deep.get('note') or 'No candidate cleared the screen today.')}</p>")
     else:
-        a(f"<p class='small'>Screened <b>{deep.get('screened', 0)}</b> names · "
+        a(f"<p class='small'>Screened <b>{_n(deep.get('screened', 0), 0)}</b> names · "
           f"<b>{deep.get('pool', 0)}</b> passed the trend filter (Stage 2 or 5/6) · showing the best "
           f"<b>{len(cands)}</b>. Ranked by structure, relative strength, trend age, liquidity "
           "and the stock's own doubling rate.</p>")

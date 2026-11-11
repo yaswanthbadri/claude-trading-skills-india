@@ -249,14 +249,24 @@ def _local_plan(entry: float, stop: float, capital: float, risk_pct: float):
     }
 
 
+def _cache_path(symbol: str):
+    p = REPO / "data" / "candles" / f"{symbol}.csv"
+    return p if p.exists() else None
+
+
 def _run_plan(symbol: str, capital: float, risk_pct: float):
+    cache = _cache_path(symbol)
+    bench = REPO / "data" / "nifty.csv"
+    if cache and bench.exists():
+        cmd = [PYTHON, str(SK / "breakout-planner" / "scripts" / "breakout.py"),
+               "plan", "--csv", str(cache), "--benchmark-csv", str(bench),
+               "--capital", str(capital), "--risk-pct", str(risk_pct), "--json"]
+    else:
+        cmd = [PYTHON, str(SK / "breakout-planner" / "scripts" / "breakout.py"),
+               "plan", "--symbol", symbol, "--benchmark", "NIFTY",
+               "--capital", str(capital), "--risk-pct", str(risk_pct), "--json"]
     try:
-        r = subprocess.run(
-            [PYTHON, str(SK / "breakout-planner" / "scripts" / "breakout.py"),
-             "plan", "--symbol", symbol, "--benchmark", "NIFTY",
-             "--capital", str(capital), "--risk-pct", str(risk_pct), "--json"],
-            cwd=REPO, capture_output=True, text=True, timeout=180,
-        )
+        r = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, timeout=180)
         out = (r.stdout or "").strip()
         out = out[out.find("{"):] if "{" in out else out
         return (json.loads(out) or {}).get("plan")
@@ -327,7 +337,7 @@ def _score(raw, rs_rating, study, age_bars, regime_ok):
 def analyse(raw_results: list, plans_by_symbol: dict | None = None,
             capital: float = 500_000, risk_pct: float = 1.0,
             top_n: int = 4, regime_label: str = "", focus: list | None = None,
-            rs_ratings: dict | None = None) -> dict:
+            rs_ratings: dict | None = None, universe_size: int | None = None) -> dict:
     """Rank candidates and produce the full per-stock deep analysis."""
     plans_by_symbol = plans_by_symbol or {}
     rs_ratings = rs_ratings or {}
@@ -355,10 +365,19 @@ def analyse(raw_results: list, plans_by_symbol: dict | None = None,
         return {"candidates": [], "note": "no Stage-2 name with enough liquidity today",
                 "screened": len(raw_results or [])}
 
-    hist = _history([r["name"] for r in pool])
+    # Two-stage shortlist: rank on structure first (cheap), then download history
+    # only for the names that can actually make the cut.
+    provisional = []
+    for raw in pool:
+        s0, _, _ = _score(raw, rs_ratings.get(raw["name"]), {}, 0, regime_ok)
+        provisional.append((s0, raw))
+    provisional.sort(key=lambda x: -x[0])
+    short = [r for _, r in provisional[:max(top_n * 4, 16)]]
+
+    hist = _history([r["name"] for r in short])
 
     scored = []
-    for raw in pool:
+    for raw in short:
         sym = raw["name"]
         df = hist.get(sym)
         study = _doubling_study(df) if df is not None else {"samples": 0, "note": "no history"}
@@ -534,7 +553,7 @@ def analyse(raw_results: list, plans_by_symbol: dict | None = None,
 
     return {
         "candidates": out,
-        "screened": len(raw_results or []),
+        "screened": universe_size or len(raw_results or []),
         "pool": len(pool),
         "as_of": datetime.now().strftime("%Y-%m-%d"),
         "disclaimer": ("A 100% target is an objective, not a forecast. The base rate is "

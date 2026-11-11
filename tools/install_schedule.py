@@ -109,6 +109,19 @@ def build_plists() -> dict[str, str]:
         + f"  <key>StandardErrorPath</key>\n  <string>{LOGS / 'alerts.log'}</string>\n"
         + FOOTER
     )
+
+    # Candle cache: hourly at :00 so the :15 bulletin scans today's bars, plus a
+    # final pass after the close.
+    cache_entries = ([{"Weekday": d, "Hour": h, "Minute": 0} for d in WEEKDAYS
+                      for h in range(9, 16)]
+                     + [{"Weekday": d, "Hour": 19, "Minute": 30} for d in WEEKDAYS])
+    plists["com.tradingskills.cache"] = (
+        _base("com.tradingskills.cache", "build_cache.py", [])
+        + _calendar(cache_entries)
+        + f"  <key>StandardOutPath</key>\n  <string>{LOGS / 'cache.log'}</string>\n"
+        + f"  <key>StandardErrorPath</key>\n  <string>{LOGS / 'cache.log'}</string>\n"
+        + FOOTER
+    )
     return plists
 
 

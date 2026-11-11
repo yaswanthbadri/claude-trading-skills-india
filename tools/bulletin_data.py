@@ -24,8 +24,14 @@ REPO = Path(__file__).resolve().parents[1]
 SK = REPO / "skills"
 PYTHON = sys.executable
 
-# Nifty 50 + Next 50 + liquid midcaps. Deliberately wide so the same handful of
-# names does not dominate the bulletin every hour.
+# Local OHLCV cache built by tools/build_cache.py. Scanning 2,200+ CSVs takes
+# about ten seconds, against several minutes of network calls.
+CACHE = REPO / "data" / "candles"
+BENCH = REPO / "data" / "nifty.csv"
+TOP_SCAN = 60          # how many ranked names the deep analysis can draw from
+
+# Fallback universe when the cache is missing or stale. Nifty 50 + Next 50 +
+# liquid midcaps, deliberately wide.
 WATCHLIST = (
     "ADANIENT,ADANIPORTS,APOLLOHOSP,ASIANPAINT,AXISBANK,BAJAJ-AUTO,BAJFINANCE,"
     "BAJAJFINSV,BEL,BHARTIARTL,BSE,CIPLA,COALINDIA,DRREDDY,EICHERMOT,ETERNAL,"
@@ -105,6 +111,46 @@ def _round(x, n=2):
         return round(float(x), n)
     except Exception:
         return None
+
+
+def cache_info() -> dict | None:
+    """Describe the local candle cache, or None when it is missing or stale."""
+    if not CACHE.is_dir() or not BENCH.exists():
+        return None
+    files = list(CACHE.glob("*.csv"))
+    if len(files) < 300:
+        return None
+    try:
+        with BENCH.open("rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - 300))
+            tail = f.read().decode("utf-8", "replace").strip().splitlines()
+        last_bar = tail[-1].split(",")[0]
+    except Exception:
+        return None
+
+    from datetime import date, timedelta
+    today = date.today()
+    try:
+        last = date.fromisoformat(last_bar)
+    except Exception:
+        return None
+
+    # Weekend/holiday tolerant: the cache only needs yesterday's close.
+    age_days = (today - last).days
+    fresh = age_days <= 4 or last == today
+    return {"path": str(CACHE), "bench": str(BENCH), "files": len(files),
+            "last_bar": last_bar, "age_days": age_days, "fresh": fresh}
+
+
+def _scan_args(info: dict | None):
+    """CLI arguments for the skills: cached CSVs when available, else yfinance."""
+    if info and info.get("fresh"):
+        return (["--csv-dir", info["path"], "--benchmark-csv", info["bench"]],
+                f"{info['files']:,} cached symbols")
+    return (["--symbols", WATCHLIST, "--exchange", "NSE", "--benchmark", "NIFTY"],
+            f"{len(WATCHLIST.split(','))} watchlist symbols (live fetch)")
 
 
 def collect(capital: float = 500_000, risk_pct: float = 1.0,
@@ -224,9 +270,15 @@ def collect(capital: float = 500_000, risk_pct: float = 1.0,
     }
 
     # ---- momentum -----------------------------------------------------------
+    cinfo = cache_info()
+    scan_args, universe_label = _scan_args(cinfo)
+    data["universe"] = {"label": universe_label,
+                        "cached": bool(cinfo and cinfo.get("fresh")),
+                        "files": (cinfo or {}).get("files"),
+                        "last_bar": (cinfo or {}).get("last_bar")}
+
     mom = _run_json([PYTHON, str(SK / "momentum-scanner" / "scripts" / "momentum.py"),
-                     "scan", "--symbols", WATCHLIST, "--exchange", "NSE",
-                     "--benchmark", "NIFTY", "--top", str(motion_top), "--json"]) or {}
+                     "scan", *scan_args, "--top", str(motion_top), "--json"]) or {}
     movers = []
     for w in mom.get("watchlist", [])[:motion_top]:
         movers.append({
@@ -244,8 +296,7 @@ def collect(capital: float = 500_000, risk_pct: float = 1.0,
 
     # ---- breakouts ----------------------------------------------------------
     bo = _run_json([PYTHON, str(SK / "breakout-planner" / "scripts" / "breakout.py"),
-                    "scan", "--symbols", WATCHLIST, "--exchange", "NSE",
-                    "--benchmark", "NIFTY", "--top", "25", "--json"]) or {}
+                    "scan", *scan_args, "--top", str(TOP_SCAN), "--json"], timeout=600) or {}
     setups = []
     for res in bo.get("results", []):
         b = res.get("base") or {}
@@ -286,11 +337,20 @@ def collect(capital: float = 500_000, risk_pct: float = 1.0,
     picks = [s for s in ordered if s["from_pivot_pct"] is not None and s["from_pivot_pct"] > -12][:candidates]
 
     # ---- trade plans --------------------------------------------------------
+    def _plan_cmd(sym: str) -> list[str]:
+        """Read the plan from the cache when possible; no network, same prices."""
+        csv_path = CACHE / f"{sym}.csv"
+        if cinfo and cinfo.get("fresh") and csv_path.exists():
+            return [PYTHON, str(SK / "breakout-planner" / "scripts" / "breakout.py"),
+                    "plan", "--csv", str(csv_path), "--benchmark-csv", BENCH,
+                    "--capital", str(capital), "--risk-pct", str(risk_pct), "--json"]
+        return [PYTHON, str(SK / "breakout-planner" / "scripts" / "breakout.py"),
+                "plan", "--symbol", sym, "--benchmark", "NIFTY",
+                "--capital", str(capital), "--risk-pct", str(risk_pct), "--json"]
+
     plans = []
     for s in picks:
-        p = _run_json([PYTHON, str(SK / "breakout-planner" / "scripts" / "breakout.py"),
-                       "plan", "--symbol", s["symbol"], "--benchmark", "NIFTY",
-                       "--capital", str(capital), "--risk-pct", str(risk_pct), "--json"])
+        p = _run_json(_plan_cmd(s["symbol"]))
         pl = (p or {}).get("plan")
         if not pl:
             continue
@@ -349,8 +409,7 @@ def collect(capital: float = 500_000, risk_pct: float = 1.0,
             # names is meaningless (it would read 1, 50, 99).
             rs_json = _run_json(
                 [PYTHON, str(SK / "momentum-scanner" / "scripts" / "momentum.py"),
-                 "rs", "--symbols", WATCHLIST, "--benchmark", "NIFTY",
-                 "--json"], timeout=420) or {}
+                 "rs", *scan_args, "--json"], timeout=600) or {}
             rs_map = {x.get("symbol"): x.get("rating")
                       for x in (rs_json.get("ratings") or [])}
 
@@ -360,6 +419,7 @@ def collect(capital: float = 500_000, risk_pct: float = 1.0,
             capital=capital, risk_pct=risk_pct, top_n=4,
             regime_label=data["regime"].get("label", ""),
             rs_ratings=rs_map,
+            universe_size=(cinfo or {}).get("files") or len(WATCHLIST.split(",")),
         )
     except Exception as e:  # never let this section break the bulletin
         data["deep"] = {"candidates": [], "note": f"deep analysis unavailable: {e}"}
