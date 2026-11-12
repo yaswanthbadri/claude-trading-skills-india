@@ -190,6 +190,20 @@ def update(years: int = 3, full: bool = False, limit: int | None = None,
         time.sleep(sleep)
 
     _save_benchmark(years)
+
+    # A bad price jump corrupts every indicator downstream and nothing
+    # complains, so the cache is checked after every build: spurious prints
+    # dropped, confirmed splits rescaled, unverifiable breaks truncated.
+    try:
+        import integrity
+        rep = integrity.repair(be_quiet=True)
+        if rep["spurious_dropped"] or rep["truncated"] or rep["breaks"]:
+            print(f"  integrity: {rep['spurious_dropped']} bad bar(s) dropped, "
+                  f"{rep['truncated']} series truncated, "
+                  f"{len(rep['breaks'])} break(s) left")
+    except Exception as e:  # never fail the build over the check
+        print(f"[integrity] check failed: {e}", file=sys.stderr)
+
     state["last_run"] = datetime.now().isoformat(timespec="seconds")
     _save_state(state)
 

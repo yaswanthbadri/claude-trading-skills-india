@@ -32,3 +32,5 @@ reports/
 # Nightly state snapshots
 data/backups/
 data/results_dates.json
+data/candles_backup/
+data/breaks.json

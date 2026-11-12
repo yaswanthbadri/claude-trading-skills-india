@@ -37,6 +37,7 @@ FILES = [
     "data/subscribers.json",
     "data/universe.csv",
     "data/results_dates.json",
+    "data/breaks.json",
     "logs/scheduler_state.json",
     "logs/alert_state.json",
     "logs/levels_state.json",

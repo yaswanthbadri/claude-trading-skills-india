@@ -299,6 +299,18 @@ def collect(capital: float = 500_000, risk_pct: float = 1.0,
         "as_of": (sec.get("benchmark") or {}).get("last_date"),
     }
 
+    # Series with a price-level break inside the indicator lookback are not
+    # readable: a 200-day average spanning two different price scales is not a
+    # 200-day average. They sit out until enough clean bars exist.
+    try:
+        import integrity
+        blocked = integrity.active_breaks()
+    except Exception:
+        blocked = {}
+    if blocked:
+        print(f"[integrity] {len(blocked)} series withheld from the scan",
+              file=sys.stderr)
+
     # ---- momentum -----------------------------------------------------------
     cinfo = cache_info()
     scan_args, universe_label = _scan_args(cinfo)
@@ -323,6 +335,8 @@ def collect(capital: float = 500_000, risk_pct: float = 1.0,
                      "scan", *scan_args, "--top", str(motion_top), "--json"]) or {}
     movers = []
     for w in mom.get("watchlist", [])[:motion_top]:
+        if w.get("symbol") in blocked:
+            continue
         movers.append({
             "symbol": w.get("symbol"),
             "close": _round(w.get("close")),
@@ -342,6 +356,8 @@ def collect(capital: float = 500_000, risk_pct: float = 1.0,
     sec_map = _sectors()
     setups = []
     for res in bo.get("results", []):
+        if res.get("name") in blocked:
+            continue
         b = res.get("base") or {}
         tt = res.get("trend_template") or {}
         liq = res.get("liquidity") or {}

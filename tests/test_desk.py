@@ -173,5 +173,50 @@ class TestLevelWatch(unittest.TestCase):
         self.assertEqual(levels_watch._candidate(rec, 101.0)[0], "entry")
 
 
+class TestIntegrity(unittest.TestCase):
+    """A false price jump silently corrupts every indicator downstream.
+
+    These are the three shapes found in the live cache. Getting the
+    classification wrong is expensive in both directions: deleting a real
+    move rewrites history, and reading through a break invents a pivot.
+    """
+
+    def _series(self, closes, volumes=None):
+        n = len(closes)
+        vols = volumes or [1000] * n
+        return [{"Date": f"2026-01-{i + 1:02d}", "Open": c, "High": c,
+                 "Low": c, "Close": c, "Volume": v}
+                for i, (c, v) in enumerate(zip(closes, vols))]
+
+    def test_single_bad_print_is_spurious(self):
+        import integrity
+        rs = self._series([100, 101, 20505, 102, 101, 100, 99])
+        hits = integrity.detect(rs)
+        self.assertEqual(len(hits), 2)          # up to it, and back down
+        self.assertTrue(all(h["kind"] == "spurious" for h in hits))
+
+    def test_a_new_price_level_is_a_break(self):
+        import integrity
+        rs = self._series([700, 690, 200, 198, 196, 195, 194])
+        hits = integrity.detect(rs)
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["kind"], "break")
+
+    def test_ordinary_moves_are_ignored(self):
+        import integrity
+        rs = self._series([100, 96, 103, 99, 101, 97, 102])
+        self.assertEqual(integrity.detect(rs), [])
+
+    def test_rescale_moves_price_and_volume_inversely(self):
+        import integrity
+        rs = self._series([500, 505, 510, 102, 103, 104])
+        integrity.rescale(rs, 3, 5.0)          # 1:5 split at index 3
+        self.assertAlmostEqual(rs[0]["Close"], 100.0)
+        self.assertAlmostEqual(rs[0]["Volume"], 5000.0)
+        self.assertAlmostEqual(rs[3]["Close"], 102.0)   # post-split bar untouched
+        # and the seam is now continuous instead of a 80% cliff
+        self.assertLess(abs(rs[3]["Close"] / rs[2]["Close"] - 1), 0.05)
+
+
 if __name__ == "__main__":
     unittest.main()
