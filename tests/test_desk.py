@@ -7,6 +7,7 @@ would have been caught here in under a second.
 
     python3 -m unittest discover -s tests -p 'test_desk*.py' -v
 """
+import pathlib
 import sys
 import unittest
 
@@ -18,6 +19,25 @@ import alert_monitor
 import bulletin_render
 import market_calendar as cal
 import recs
+import subscribers
+
+
+def setUpModule():
+    """Point the subscriber store at a scratch file for the whole module.
+
+    Reading is harmless; writing is not. A test that stubs load() but not
+    save() silently replaced the real subscribers.json with its fixture users
+    and the bot went from 2 people to 6. The store path is patched here so no
+    test can reach the live address book by accident.
+    """
+    import tempfile
+    global _ORIG_STORE
+    _ORIG_STORE = subscribers.STORE
+    subscribers.STORE = pathlib.Path(tempfile.mkdtemp()) / "subscribers.json"
+
+
+def tearDownModule():
+    subscribers.STORE = _ORIG_STORE
 
 
 class TestHeadlineMatcher(unittest.TestCase):
@@ -340,6 +360,251 @@ class TestAlertOutcomes(unittest.TestCase):
             [{"symbol": "A", "event": "x", "t1": 0.5, "t5": None}], min_n=1)
         self.assertEqual(res["scored"], 0)
         self.assertEqual(res["awaiting"], 1)
+
+
+class TestSubscriberPreferences(unittest.TestCase):
+    """Silence should be a setting, not an unsubscribe."""
+
+    def _store(self):
+        return {"version": 1, "users": {
+            "1": {"name": "owner", "role": "owner", "active": True, "mode": "all"},
+            "2": {"name": "quiet", "active": True, "mode": "quiet"},
+            "3": {"name": "alerts", "active": True, "mode": "alerts"},
+            "4": {"name": "off", "active": True, "mode": "none"},
+            "5": {"name": "paused", "active": False, "mode": "all"},
+            "6": {"name": "snoozed", "active": True, "mode": "all",
+                  "snooze_until": "2999-01-01T00:00:00"},
+        }}
+
+    def test_each_mode_gets_only_what_it_asked_for(self):
+        import subscribers as sub
+        orig_load, orig_save = sub.load, sub.save
+        import os
+        orig_env = os.environ.pop("TELEGRAM_CHAT_ID", None)
+        sub.load, sub.save = (lambda: self._store()), (lambda s: None)
+        try:
+            # quiet (2) still wants the plan and the review; a snoozed person
+            # (6) keeps the plan too — only the alerts go quiet.
+            day = ["1", "2", "6"]
+            self.assertEqual(sub.audience("daily"), day)
+            self.assertEqual(sub.audience("eod"), day)
+            self.assertEqual(sub.audience("intraday"), ["1", "6"])
+            # a snooze silences alerts but never the plan
+            self.assertEqual(sub.audience("alert"), ["1", "3"])
+            self.assertEqual(sub.audience("level"), ["1", "3"])
+            self.assertNotIn("4", sub.audience("daily"))   # none means none
+            self.assertNotIn("5", sub.audience("daily"))   # inactive is inactive
+        finally:
+            sub.load, sub.save = orig_load, orig_save
+            if orig_env is not None:
+                os.environ["TELEGRAM_CHAT_ID"] = orig_env
+
+    def test_snooze_expires(self):
+        import subscribers as sub
+        orig_load, orig_save = sub.load, sub.save
+        store = self._store()
+        sub.load, sub.save = (lambda: store), (lambda s: None)
+        try:
+            self.assertTrue(sub.snoozed("6"))
+            self.assertFalse(sub.snoozed("1"))
+            self.assertFalse(sub.wants("6", "alert"))
+            self.assertTrue(sub.wants("6", "daily"))
+        finally:
+            sub.load, sub.save = orig_load, orig_save
+
+    def test_set_mode_rejects_nonsense(self):
+        import subscribers as sub
+        with self.assertRaises(ValueError):
+            sub.set_mode("1", "loud")
+
+
+class TestWatchlist(unittest.TestCase):
+    """A watch is a promise about one level, kept once a day."""
+
+    def _run(self):
+        import subscribers as sub
+        store = {"version": 1, "users": {
+            "9": {"name": "me", "active": True, "watch": {}}}}
+        orig_load, orig_save = sub.load, sub.save
+        sub.load = lambda: store
+        sub.save = lambda s: None
+        return sub, store, (orig_load, orig_save)
+
+    def test_add_read_remove(self):
+        sub, store, orig = self._run()
+        try:
+            self.assertTrue(sub.watch("9", "centum", 4230.0))
+            self.assertEqual(sub.watchlist("9")["CENTUM"]["pivot"], 4230.0)
+            self.assertEqual(sub.watchlist("9")["CENTUM"]["kind"], "pivot")
+            self.assertTrue(sub.unwatch("9", "CENTUM"))
+            self.assertFalse(sub.unwatch("9", "CENTUM"))
+        finally:
+            sub.load, sub.save = orig
+
+    def test_a_kind_outside_the_three_is_dropped(self):
+        sub, store, orig = self._run()
+        try:
+            sub.watch("9", "X", 10.0, kind="whatever")
+            self.assertEqual(sub.watchlist("9")["X"]["kind"], "pivot")
+            sub.watch("9", "Y", 10.0, kind="above")
+            self.assertEqual(sub.watchlist("9")["Y"]["kind"], "above")
+        finally:
+            sub.load, sub.save = orig
+
+    def test_once_a_day_is_one_date_prefix(self):
+        import watch_scan
+        self.assertTrue(watch_scan._already_today(
+            {"notified": watch_scan._today() + "T10:00:00"}))
+        self.assertFalse(watch_scan._already_today(
+            {"notified": "2020-01-01T10:00:00"}))
+        self.assertFalse(watch_scan._already_today({}))
+
+    def test_the_alert_says_what_the_level_was(self):
+        import watch_scan
+        msg = watch_scan._message("CENTUM", 4230.0, 4260.0, "pivot")
+        self.assertIn("CENTUM", msg)
+        self.assertIn("4,230.00", msg)
+        self.assertIn("+0.7%", msg)
+        self.assertIn("not advice", msg)
+        # an unknown kind still reads as a cleared level, never a crash
+        self.assertIn("cleared your level",
+                      watch_scan._message("X", 1.0, 2.0, "weird"))
+
+
+class TestButtonPayloads(unittest.TestCase):
+    """A button that sends a verb the dispatcher does not know is a dead button."""
+
+    def test_every_callback_fits_telegrams_limit(self):
+        import buttons
+        for kb in (buttons.alert("BAJAJ-AUTO"), buttons.levels("BAJAJ-AUTO"),
+                   buttons.watch("BAJAJ-AUTO"), buttons.alert(None)):
+            for row in kb["inline_keyboard"]:
+                for b in row:
+                    self.assertLessEqual(len(b["callback_data"].encode()), 64)
+                    verb, arg = buttons.parse(b["callback_data"])
+                    self.assertIn(verb, {"book", "heat", "check", "unwatch",
+                                         "snooze", "status"})
+
+    def test_parse_splits_on_the_first_colon_only(self):
+        import buttons
+        self.assertEqual(buttons.parse("check:M&M"), ("check", "M&M"))
+        self.assertEqual(buttons.parse("book"), ("book", ""))
+        self.assertEqual(buttons.parse(""), ("", ""))
+
+
+class TestBotCards(unittest.TestCase):
+    """The chat card and the report must agree, or people stop trusting both."""
+
+    def test_check_card_shows_the_chain(self):
+        import stock_check
+        r = {
+            "symbol": "CENTUM", "name": "CENTUM", "close": 4239.5,
+            "verdict": "BUY-READY", "css": "ok",
+            "stage2": True, "tt_passed": 6, "tt_total": 6, "tt_failed": [],
+            "base": {"type": "VCP", "grade": "A", "weeks": 6.6, "depth": 26.6,
+                     "pivot": 4230.0, "from_pivot_pct": 0.2},
+            "gate": {"blockers": [], "notes": [], "band_pct": 20,
+                     "series": "EQ"},
+            "delivery": {"deliv_pct": 43, "multiple": None},
+            "results": {},
+            "held": {"status": "filled", "entry": 4238.5, "stop": 4008.4,
+                     "t1": 5054.0},
+            "plan": {"trigger": 4238.5, "limit": 4356.9, "stop": 4008.4,
+                     "stop_method": "structure", "qty": 13,
+                     "position_value": 56640, "allocation_pct": 11.3,
+                     "warnings": ["stop is inside the base"],
+                     "targets": [{"r": 2.0, "price": 5054.0, "pct": 16.0},
+                                 {"r": 3.0, "price": 5402.5, "pct": 24.0}]},
+        }
+        card = stock_check.card(r)
+        for must in ("CENTUM", "Stage 2", "VCP grade A", "Pivot", "Buy above",
+                     "Stop", "T1", "2R", "BUY-READY", "not advice",
+                     "Already on the book"):
+            self.assertIn(must, card)
+
+    def test_no_base_is_said_plainly_not_reported_as_a_grade(self):
+        import stock_check
+        card = stock_check.card({
+            "symbol": "TCS", "name": "TCS", "close": 2442.4,
+            "verdict": "WATCH ONLY", "css": "warn", "stage2": False,
+            "tt_passed": 1, "tt_total": 5, "tt_failed": ["SMA200 rising"],
+            "base": {"type": None, "grade": None, "note": "no base yet"},
+            "gate": {"blockers": [], "notes": [], "series": "EQ"},
+            "delivery": {}, "results": {}, "held": None, "plan": {},
+        })
+        self.assertIn("no tight base", card)
+        self.assertIn("no base yet", card)
+        self.assertNotIn("Buy above", card)
+
+    def test_an_error_is_one_line_not_a_traceback(self):
+        import stock_check
+        self.assertIn("no data", stock_check.card(
+            {"error": "no data for NOPE — check the NSE symbol"}))
+
+    def test_book_and_heat_cards_survive_an_empty_book(self):
+        import bot_listener as bot
+        import recs
+        orig_live, orig_load = bot._live, recs.load
+        bot._live = lambda syms: {}
+        recs.load = lambda: {"records": []}
+        try:
+            self.assertIn("Book is empty", bot.book_text())
+        finally:
+            bot._live, recs.load = orig_live, orig_load
+        heat = bot.heat_text()
+        self.assertIn("Portfolio heat", heat)
+        self.assertIn("Cap", heat)
+
+
+class TestDeliveryRouting(unittest.TestCase):
+    """Who receives a message is decided in one place."""
+
+    def test_kind_is_read_from_the_bulletin_mode(self):
+        # 'daily' and 'eod' are promises; an intraday card is not.
+        kinds = {"daily": "daily", "eod": "eod",
+                 "intraday": "intraday", "": "intraday"}
+        for mode, want in kinds.items():
+            self.assertEqual({"daily": "daily", "eod": "eod"}.get(
+                mode, "intraday"), want)
+
+    def test_an_explicit_chat_id_bypasses_the_audience_filter(self):
+        import notify
+        sent = []
+        orig_aud, orig_msg, orig_sleep = notify._audience, notify.send_message, notify.time.sleep
+        notify._audience = lambda kind: ["1", "2"]
+        notify.send_message = lambda tok, cid, text, **kw: sent.append(cid) or True
+        notify.time.sleep = lambda s: None
+        try:
+            notify.token = lambda: "T"
+            res = notify.send("hi", chat_id="7", kind="alert")
+            self.assertEqual(sent, ["7"])
+            self.assertEqual(res["sent"], 1)
+            sent.clear()
+            notify.send("hi", kind="alert")
+            self.assertEqual(sent, ["1", "2"])
+        finally:
+            notify._audience, notify.send_message, notify.time.sleep = (
+                orig_aud, orig_msg, orig_sleep)
+
+    def test_a_keyboard_is_carried_through_to_the_api_call(self):
+        import notify
+        seen = {}
+        orig_aud, orig_msg, orig_sleep = notify._audience, notify.send_message, notify.time.sleep
+        notify._audience = lambda kind: ["1"]
+        notify.time.sleep = lambda s: None
+
+        def fake(tok, cid, text, **kw):
+            seen.update(kw)
+            return True
+        notify.send_message = fake
+        try:
+            notify.token = lambda: "T"
+            kb = {"inline_keyboard": [[{"text": "Book", "callback_data": "book"}]]}
+            notify.send("hi", kind="alert", reply_markup=kb)
+            self.assertEqual(seen.get("reply_markup"), kb)
+        finally:
+            notify._audience, notify.send_message, notify.time.sleep = (
+                orig_aud, orig_msg, orig_sleep)
 
 
 if __name__ == "__main__":

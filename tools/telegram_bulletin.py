@@ -462,6 +462,7 @@ def main() -> int:
         return 1
 
     json_path = md_path.with_suffix(".json")
+    data = {}
     if json_path.exists():
         data = json.loads(json_path.read_text())
         chunks = build_messages(data)
@@ -473,10 +474,15 @@ def main() -> int:
     if html_path is not None and not html_path.exists():
         html_path = None
 
+    # The schedule decides the kind; the subscriber decides whether they want
+    # it. An intraday card is not the same promise as the 09:00 plan.
+    _mode = (data or {}).get("mode") or "intraday"
+    kind = {"daily": "daily", "eod": "eod"}.get(_mode, "intraday")
     res = notify.broadcast(
         chunks,
         document=html_path,
         caption="Full report (styled HTML — best on desktop)",
+        kind=kind,
     )
     if not res["sent"]:
         print(f"Delivery failed for every chat: {res}", file=sys.stderr)

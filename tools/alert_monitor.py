@@ -44,6 +44,7 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import buttons
 import market_calendar as cal
 
 REPO = Path(__file__).resolve().parents[1]
@@ -355,14 +356,15 @@ def _global_rate_ok(state: dict, max_per_30min: int = 4) -> bool:
 # ---------------------------------------------------------------------------
 # Telegram
 # ---------------------------------------------------------------------------
-def send_telegram(text: str, dry: bool = False) -> bool:
+def send_telegram(text: str, dry: bool = False,
+                  reply_markup: dict | None = None) -> bool:
     if dry:
         print("\n----- DRY RUN MESSAGE -----")
         print(re.sub(r"<[^>]+>", "", text))
         return True
     import notify
     try:
-        res = notify.send(text)
+        res = notify.send(text, kind="alert", reply_markup=reply_markup)
     except Exception as exc:  # noqa: BLE001
         print(f"Telegram credentials missing or send failed: {exc}", file=sys.stderr)
         return False
@@ -629,7 +631,8 @@ def scan_events(state: dict, dry: bool) -> list[str]:
                 body += f"\n<a href=\"{esc(item['link'])}\">Read the story</a>"
             body += "\n\n<i>Educational only — not advice.</i>"
 
-            if send_telegram(body, dry=dry):
+            if send_telegram(body, dry=dry,
+                             reply_markup=buttons.alert(sym) if sym else None):
                 if not dry:
                     _audit(sym, label, item["title"], item["source"], item["link"])
                 print(f"  → {sym or 'market'} · {label}: {item['title'][:80]}")
@@ -690,7 +693,7 @@ def scan_shocks(state: dict, dry: bool) -> list[str]:
                   f"changing its mind, not drift. Look for results, an order or a block "
                   f"deal before acting.</i>\n\n<i>Educational only — not advice.</i>"
             )
-            if send_telegram(body, dry=dry):
+            if send_telegram(body, dry=dry, reply_markup=buttons.alert(sym)):
                 if not dry:
                     _audit(sym, "price shock", f"{chg:+.2f}% on {volx or 0:.1f}x volume",
                            "price", "")
@@ -738,6 +741,14 @@ def main() -> int:
 
     if not prices_only:
         sent += scan_events(state, dry)
+
+    # Personal watchlists: addressed to one chat, never broadcast.
+    if not news_only:
+        try:
+            import watch_scan
+            sent += [f"watch:{w}" for w in watch_scan.scan(dry=dry)]
+        except Exception as exc:  # noqa: BLE001
+            print(f"[warn] watch scan failed: {exc}", file=sys.stderr)
 
     if not news_only and cal.is_market_open():
         sent += scan_shocks(state, dry)

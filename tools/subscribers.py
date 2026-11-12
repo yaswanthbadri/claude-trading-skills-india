@@ -13,7 +13,20 @@ data/subscribers.json
     {"version": 1,
      "users": {"1389256373": {"name": "...", "username": "...",
                               "joined": "...", "last_seen": "...",
-                              "active": true, "role": "owner"}}}
+                              "active": true, "role": "owner",
+                              "mode": "all", "snooze_until": null,
+                              "watch": {"CENTUM": {"pivot": 4238.5, "added": "..."}}}}}
+
+Delivery is per person, not per list. A friend who wants the 09:00 plan and the
+16:00 review should not have to accept fourteen hourly cards to get them, and
+the only alternative used to be /stop, which turned off the parts that mattered
+too.
+
+Modes
+    all      everything (default)
+    quiet    the daily plan and the evening review only
+    alerts   alerts and level breaches only — no scheduled reports
+    none     nothing until /mode is set again
 """
 from __future__ import annotations
 
@@ -56,6 +69,18 @@ def _seed_owner(store: dict) -> bool:
         "active": True, "role": "owner",
     }
     return True
+
+
+MODES = ("all", "quiet", "alerts", "none")
+
+# Which mode a message kind is allowed through. "quiet" is the plan and the
+# review; "alerts" is the two things that are time-critical.
+MODE_KINDS = {
+    "all": {"daily", "eod", "intraday", "alert", "level", "system"},
+    "quiet": {"daily", "eod", "system"},
+    "alerts": {"alert", "level", "system"},
+    "none": {"system"},
+}
 
 
 def add(chat_id: str | int, name: str = "", username: str = "",
@@ -110,12 +135,140 @@ def active_count() -> int:
     return len(recipients())
 
 
+# ---------------------------------------------------------------------------
+# preferences
+# ---------------------------------------------------------------------------
+def user(chat_id: str | int) -> dict:
+    store = load()
+    return store["users"].get(str(chat_id), {})
+
+
+def is_owner(chat_id: str | int) -> bool:
+    u = user(chat_id)
+    if u.get("role") == "owner":
+        return True
+    import os
+    from datetime import datetime as _dt
+    owner = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
+    return bool(owner) and str(chat_id) == owner
+
+
+def mode_of(chat_id: str | int) -> str:
+    return (user(chat_id).get("mode") or "all").lower()
+
+
+def set_mode(chat_id: str | int, mode: str) -> str:
+    mode = (mode or "").strip().lower()
+    if mode not in MODES:
+        raise ValueError(f"mode must be one of {', '.join(MODES)}")
+    store = load()
+    cid = str(chat_id)
+    if cid not in store["users"]:
+        return "unknown"
+    store["users"][cid]["mode"] = mode
+    store["users"][cid]["last_seen"] = _now()
+    save(store)
+    return mode
+
+
+def snooze(chat_id: str | int, minutes: int) -> str | None:
+    """Silence alerts for a while without losing the subscription."""
+    from datetime import timedelta
+    store = load()
+    cid = str(chat_id)
+    if cid not in store["users"]:
+        return None
+    until = (datetime.now() + timedelta(minutes=max(1, minutes))).isoformat(timespec="seconds")
+    store["users"][cid]["snooze_until"] = until
+    save(store)
+    return until
+
+
+def snoozed(chat_id: str | int) -> bool:
+    until = user(chat_id).get("snooze_until")
+    if not until:
+        return False
+    try:
+        return datetime.fromisoformat(until) > datetime.now()
+    except Exception:
+        return False
+
+
+def wants(chat_id: str | int, kind: str) -> bool:
+    """Should this person receive a message of this kind, right now?"""
+    if kind in ("alert", "level") and snoozed(chat_id):
+        return False
+    return kind in MODE_KINDS.get(mode_of(chat_id), MODE_KINDS["all"])
+
+
+def audience(kind: str) -> list[str]:
+    return [cid for cid in recipients() if wants(cid, kind)]
+
+
+# ---------------------------------------------------------------------------
+# per-person watchlist
+# ---------------------------------------------------------------------------
+def watch(chat_id: str | int, symbol: str, pivot: float | None = None,
+          kind: str = "pivot") -> bool:
+    store = load()
+    cid = str(chat_id)
+    if cid not in store["users"]:
+        return False
+    sym = symbol.strip().upper()
+    if not sym:
+        return False
+    w = store["users"][cid].setdefault("watch", {})
+    w[sym] = {"pivot": round(float(pivot), 2) if pivot else None,
+              "kind": kind if kind in ("pivot", "high", "above") else "pivot",
+              "added": _now(), "notified": None}
+    save(store)
+    return True
+
+
+def unwatch(chat_id: str | int, symbol: str) -> bool:
+    store = load()
+    cid = str(chat_id)
+    if cid not in store["users"]:
+        return False
+    w = store["users"][cid].get("watch") or {}
+    if symbol.strip().upper() not in w:
+        return False
+    del w[symbol.strip().upper()]
+    save(store)
+    return True
+
+
+def watchlist(chat_id: str | int) -> dict:
+    return dict(user(chat_id).get("watch") or {})
+
+
+def mark_notified(chat_id: str | int, symbol: str) -> None:
+    store = load()
+    cid = str(chat_id)
+    w = (store["users"].get(cid) or {}).get("watch") or {}
+    if symbol in w:
+        w[symbol]["notified"] = _now()
+        save(store)
+
+
+def all_watchers() -> list[tuple[str, str, dict]]:
+    """(chat_id, symbol, entry) for every watch across every user."""
+    out = []
+    for cid, u in load()["users"].items():
+        if not u.get("active", True):
+            continue
+        for sym, entry in (u.get("watch") or {}).items():
+            out.append((cid, sym, entry or {}))
+    return out
+
+
 def summary() -> list[dict]:
     store = load()
     return [
         {"chat_id": cid, "name": u.get("name") or "", "username": u.get("username") or "",
          "active": bool(u.get("active", True)), "role": u.get("role") or "member",
-         "joined": u.get("joined"), "last_seen": u.get("last_seen")}
+         "joined": u.get("joined"), "last_seen": u.get("last_seen"),
+         "mode": u.get("mode") or "all", "watch": len(u.get("watch") or {})}
         for cid, u in store["users"].items()
     ]
 

@@ -132,7 +132,10 @@ def compute(capital: float | None = None, risk_pct: float | None = None,
     else:
         status = "ok"
 
-    clusters = [s for s in sector_rows if s["count"] >= 3]
+    # "Other" is the bucket for symbols the universe file does not classify,
+    # not a sector. Three unclassified names are not correlated risk.
+    clusters = [s for s in sector_rows
+                if s["count"] >= 3 and s["sector"] not in ("Other", "", None)]
 
     return {
         "capital": round(capital),

@@ -218,8 +218,10 @@ def scan(dry: bool = False) -> list[str]:
             sent.append(key)
             continue
         import notify
+        import buttons
         try:
-            res = notify.send(body)
+            res = notify.send(body, kind="level",
+                              reply_markup=buttons.levels(rec["symbol"]))
         except Exception as exc:  # noqa: BLE001
             print(f"[warn] send failed: {exc}", file=sys.stderr)
             break
