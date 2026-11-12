@@ -117,10 +117,26 @@ def record(data: dict, source: str | None = None) -> int:
 
     regime = ((data.get("regime") or {}).get("label") or "")
 
+    # A plan that is still live was already a position you were told to take.
+    # Publishing it again tomorrow is fine; booking it twice is not, because
+    # the risk engine would count the same rupees twice and the desk would
+    # "recommend" a stock you already hold at the same trigger.
+    live_entries: dict[tuple[str, float], str] = {}
+    for r in store["records"]:
+        if r.get("status") in ("pending_fill", "filled", "t1_hit"):
+            key = (r["symbol"], round(float(r.get("entry") or 0), 2))
+            live_entries.setdefault(key, r.get("live_from") or r.get("date") or "")
+
     def add(symbol, plan, src, structure, score=None, base_type=None,
             base_grade=None, sector=None):
         nonlocal added
         if not symbol or not plan or not plan.get("entry"):
+            return
+
+        key = (symbol, round(float(plan.get("entry")), 2))
+        held_on = live_entries.get(key)
+        if held_on and held_on != first_session:
+            # Same trigger, same stock, already on the book: refresh nothing.
             return
         # Key on the session the plan is FOR, not the evening it was published.
         # An after-close plan for Thursday and Thursday's 09:00 plan are the same
@@ -150,6 +166,7 @@ def record(data: dict, source: str | None = None) -> int:
             return
         by_id[rid] = rec
         store["records"].append(rec)
+        live_entries[key] = first_session
         added += 1
 
     for p in data.get("plans") or []:

@@ -115,8 +115,62 @@ def results_note(p: dict, markdown: bool = True) -> str:
     return f"Results {when}."
 
 
+def gate_line(p: dict, markdown: bool = True) -> str:
+    """One line about whether this plan can be filled at all."""
+    blockers = p.get("blockers") or []
+    note = (p.get("tradability_note") or "").strip()
+    if blockers:
+        body = "; ".join(blockers)
+        return (f"🚫 **{body}** — treat as a watch only, not an order."
+                if markdown else f"{body} — treat as a watch only, not an order.")
+    if note:
+        return f"_{note.capitalize()}._" if markdown else note.capitalize() + "."
+    return ""
+
+
+def delivery_line(p: dict, markdown: bool = True) -> str:
+    note = (p.get("deliv_note") or "").strip()
+    if not note:
+        return ""
+    return f"Delivery: {note}." if not markdown else f"_Delivery: {note}._"
+
+
+def heat_block(d: dict, markdown: bool = True) -> list[str]:
+    """Portfolio heat, in the plainest possible words."""
+    h = d.get("heat") or {}
+    if not h.get("capital"):
+        return []
+    out = []
+    out.append(f"**Total risk today:** {h['open_count']} open and "
+               f"{h['pending_count']} waiting — {_money(h['at_risk'])} at risk "
+               f"({h['at_risk_pct']:.1f}% of capital), {_money(h['committed'])} "
+               f"more if every trigger fills ({h['committed_pct']:.1f}%).")
+    if h["status"] == "hot":
+        out.append(f"That is at or past the {h['cap_pct']:g}% heat cap. "
+                   f"No new positions today — the book is already the trade.")
+    elif h["status"] == "warm":
+        out.append(f"Most of the {h['cap_pct']:g}% cap is used. At most "
+                   f"{h['slots']} new position(s) fit.")
+    else:
+        out.append(f"Room for {h['slots']} more position(s) inside the "
+                   f"{h['cap_pct']:g}% cap.")
+    if h["committed_pct"] > h["cap_pct"]:
+        out.append(f"If every pending trigger fills you would be at "
+                   f"{h['committed_pct']:.1f}%, above the {h['cap_pct']:g}% cap — "
+                   f"place the best few, not all of them.")
+    for c in h.get("clusters") or []:
+        out.append(f"{c['sector']} carries {c['count']} names "
+                   f"({', '.join(c['symbols'])}) — {_money(c['risk'])} of "
+                   f"correlated risk.")
+    return out
+
+
 def plan_verdict(p: dict) -> tuple[str, str]:
     """Return (label, css class) for a trade plan."""
+    if p.get("blockers"):
+        # A 2% band means the trigger and the stop cannot both be honoured,
+        # so this can never be a BUY-READY no matter how good the chart is.
+        return "NOT TRADABLE — see the restriction", "warn"
     fp = p.get("from_pivot_pct")
     grade = (p.get("base_grade") or "D").upper()
     if fp is not None and fp > 1.5:
@@ -336,6 +390,14 @@ def _calls_md(d: dict, sec=None) -> list[str]:
                      f"{r.get('sessions') or 0} |")
         L.append("")
 
+    ao = d.get("alert_outcomes") or {}
+    if ao.get("scored"):
+        L.append("### Did the alerts mean anything")
+        L.append("")
+        for line in ao.get("lines") or []:
+            L.append(f"- {line}")
+        L.append("")
+
     focus = d.get("focus") or []
     if focus:
         L.append("### What to focus on next session")
@@ -405,6 +467,13 @@ def _calls_html(a, d: dict, h2) -> None:
                  _n(r.get("last_close")), _r_fmt(r.get("r")),
                  str(r.get("sessions") or 0)] for r in open_rows]
         a(_table(["Stock", "Entry", "Stop", "T1", "T2", "Last", "R now", "Days"], rows))
+
+    ao = d.get("alert_outcomes") or {}
+    if ao.get("scored"):
+        a("<div class='dhd'>Did the alerts mean anything</div><ul class='clean'>")
+        for line in ao.get("lines") or []:
+            a(f"<li>{_h.escape(line)}</li>")
+        a("</ul>")
 
     focus = d.get("focus") or []
     if focus:
@@ -627,6 +696,11 @@ def render_md(d: dict) -> str:
         a(line)
 
     h2("Trade Plans")
+    _heat = heat_block(d)
+    if _heat:
+        a("")
+        for _line in _heat:
+            a(f"- {_line}")
     a("")
     a("### Plain English first")
     a("")
@@ -658,6 +732,12 @@ def render_md(d: dict) -> str:
             _res = results_note(p)
             if _res:
                 a(f"- {_res}")
+            _gate = gate_line(p)
+            if _gate:
+                a(f"- {_gate}")
+            _del = delivery_line(p)
+            if _del:
+                a(f"- {_del}")
             a(f"- **Buy above {_n(p['trigger'])}** (limit {_n(p['limit'])})")
             a(f"- **Stop {_n(p['stop'])}** ({_pct(-(p['stop_pct'] or 0))} from trigger, {p['stop_method']})")
             a(f"- Size: {p['qty']} shares, {_money(p['position_value'])} "
@@ -1264,6 +1344,12 @@ footer{
 
     # --- Plans ---
     h2("Trade plans")
+    _heat = heat_block(d)
+    if _heat:
+        cls = "bad" if (d.get("heat") or {}).get("status") == "hot" else (
+            "warn" if (d.get("heat") or {}).get("status") == "warm" else "")
+        a(f"<div class='callout{' ' + cls if cls else ''}'><b>Total risk today</b><br>"
+          + "<br>".join(_h.escape(x).replace("**", "") for x in _heat) + "</div>")
     ready = [p for p in d["plans"] if plan_verdict(p)[1] == "good"]
     if d["plans"] and not ready:
         a("<div class='callout warn'><b>No A-grade setup today.</b> "

@@ -45,8 +45,10 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", choices=["intraday", "daily", "eod"], default="intraday")
     ap.add_argument("--no-push", action="store_true")
-    ap.add_argument("--capital", type=float, default=500_000)
-    ap.add_argument("--risk-pct", type=float, default=1.0)
+    ap.add_argument("--capital", type=float, default=None,
+                    help="override TRADING_CAPITAL from .env")
+    ap.add_argument("--risk-pct", type=float, default=None,
+                    help="override RISK_PCT from .env")
     ap.add_argument("--candidates", type=int, default=6)
     ap.add_argument("--force", action="store_true",
                     help="run even on a market holiday")

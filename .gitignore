@@ -34,3 +34,5 @@ data/backups/
 data/results_dates.json
 data/candles_backup/
 data/breaks.json
+data/tradability.json
+data/delivery/

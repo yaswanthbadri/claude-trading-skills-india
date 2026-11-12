@@ -183,9 +183,19 @@ def _diversify(rows: list[dict], want: int, per_sector: int = MAX_PER_SECTOR) ->
     return out
 
 
-def collect(capital: float = 500_000, risk_pct: float = 1.0,
+def collect(capital: float | None = None, risk_pct: float | None = None,
             candidates: int = 6, motion_top: int = 8) -> dict:
     """Gather the full bulletin dataset."""
+    # Capital and risk live in .env. Every share count derives from them, so a
+    # wrong default would make the sizing wrong while looking authoritative.
+    try:
+        import settings
+        capital = capital if capital is not None else settings.capital()
+        risk_pct = risk_pct if risk_pct is not None else settings.risk_pct()
+    except Exception:
+        capital = capital if capital is not None else 500_000.0
+        risk_pct = risk_pct if risk_pct is not None else 1.0
+
     data: dict = {"generated_at": datetime.now().isoformat(timespec="seconds")}
 
     # ---- exchange calendar --------------------------------------------------
@@ -393,11 +403,43 @@ def collect(capital: float = 500_000, risk_pct: float = 1.0,
         ok += 10 if (s["liquidity_cr"] or 0) >= 20 else 0
         return -ok
 
+    # ---- how much is already at risk ---------------------------------------
+    heat = {}
+    try:
+        import heat as heat_mod
+        heat = heat_mod.compute(capital=capital, risk_pct=risk_pct)
+    except Exception as e:  # never lose the report over this
+        print(f"[warn] heat unavailable: {e}", file=sys.stderr)
+    data["heat"] = heat
+    if heat:
+        data["heat_lines"] = heat_mod.headline(heat)
+
+    # A hot book publishes fewer ideas, not the usual six. Per-trade sizing
+    # cannot see the total, so the cap has to be applied here.
+    budget = candidates
+    if heat:
+        budget = min(candidates, max(0, heat.get("slots") or 0))
+        if budget < candidates:
+            print(f"[heat] {heat['at_risk_pct']:.1f}% at risk of a "
+                  f"{heat['cap_pct']:g}% cap — {budget} new plan(s) instead of "
+                  f"{candidates}", file=sys.stderr)
+
+    # Never re-recommend something you already own and have filled: a second
+    # entry is a different trade at a different price, not this one.
+    held = set()
+    try:
+        import recs as _recs
+        held = {r["symbol"] for r in _recs.load()["records"]
+                if r.get("status") in ("filled", "t1_hit")}
+    except Exception:
+        pass
+
     ordered = sorted(setups, key=rank_key)
     tradable = [s for s in ordered
                 if s["from_pivot_pct"] is not None and s["from_pivot_pct"] > -12
-                and (s["liquidity_cr"] or 0) >= MIN_TURNOVER_CR]
-    picks = _diversify(tradable, candidates)
+                and (s["liquidity_cr"] or 0) >= MIN_TURNOVER_CR
+                and s["symbol"] not in held]
+    picks = _diversify(tradable, budget)
 
     # ---- trade plans --------------------------------------------------------
     def _plan_cmd(sym: str) -> list[str]:
@@ -470,6 +512,42 @@ def collect(capital: float = 500_000, risk_pct: float = 1.0,
             p["results_sessions"] = None
             p["results_source"] = "unknown"
 
+    # ---- can it actually be filled, and is the move being bought? ----------
+    if plans:
+        syms = [p["symbol"] for p in plans]
+        try:
+            import tradability
+            gate = tradability.summary(syms)
+        except Exception as e:  # noqa: BLE001
+            print(f"[warn] tradability unavailable: {e}", file=sys.stderr)
+            gate = {"blocked": {}, "flagged": {}, "rows": {}}
+        try:
+            import delivery as delivery_mod
+            deliv = delivery_mod.annotate(syms)
+        except Exception as e:  # noqa: BLE001
+            print(f"[warn] delivery unavailable: {e}", file=sys.stderr)
+            deliv = {}
+
+        kept = []
+        for p in plans:
+            row = (gate.get("rows") or {}).get(p["symbol"]) or {}
+            p["blockers"] = row.get("blockers") or []
+            p["tradability_note"] = "; ".join(row.get("notes") or [])
+            p["band_pct"] = row.get("band_pct")
+            p["series"] = row.get("series")
+            dd = deliv.get(p["symbol"]) or {}
+            p["deliv_pct"] = dd.get("deliv_pct")
+            p["deliv_multiple"] = dd.get("multiple")
+            p["deliv_note"] = delivery_mod.verdict(dd) if dd else ""
+            if p["blockers"]:
+                # Keep it visible as a watch, but never as an order.
+                print(f"[gate] {p['symbol']}: {'; '.join(p['blockers'])}",
+                      file=sys.stderr)
+            kept.append(p)
+        plans = kept
+        data["gate"] = {"blocked": gate.get("blocked") or {},
+                        "flagged": gate.get("flagged") or {}}
+
     data["plans"] = plans
     data["params"] = {"capital": capital, "risk_pct": risk_pct,
                       "watchlist": WATCHLIST, "candidates": candidates}
@@ -504,6 +582,16 @@ def collect(capital: float = 500_000, risk_pct: float = 1.0,
         )
     except Exception as e:  # never let this section break the bulletin
         data["deep"] = {"candidates": [], "note": f"deep analysis unavailable: {e}"}
+
+    # ---- did the alerts precede a move? -------------------------------------
+    try:
+        import alert_outcomes
+        res = alert_outcomes.report()
+        data["alert_outcomes"] = {"lines": alert_outcomes.lines(res),
+                                  "scored": res["scored"]}
+    except Exception as e:  # noqa: BLE001
+        print(f"[warn] alert outcomes unavailable: {e}", file=sys.stderr)
+        data["alert_outcomes"] = {"lines": [], "scored": 0}
 
     # ---- headlines ----------------------------------------------------------
     data["headlines"] = _headlines()

@@ -251,6 +251,14 @@ def msg_plan(p: dict) -> str:
         f"<i>limit {n(p['limit'])} — never pay more</i>",
         f"<b>Stop</b>  {n(p['stop'])}  ({pct(-(p['stop_pct'] or 0))}, {esc(p['stop_method'] or '')})",
     ]
+    _blockers = p.get("blockers") or []
+    if _blockers:
+        lines.append(f"🚫 <b>{esc('; '.join(_blockers))}</b> — watch only")
+    elif p.get("tradability_note"):
+        lines.append(f"<i>{esc(p['tradability_note'].capitalize())}</i>")
+    if p.get("deliv_note"):
+        lines.append(f"<i>Delivery: {esc(p['deliv_note'])}</i>")
+
     _rd = p.get("results_date")
     if _rd:
         try:

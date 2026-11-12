@@ -112,3 +112,10 @@ be answered at random. Pick one home for the bot and stop the other:
 # on the Mac, once the cloud desk is live
 launchctl unload ~/Library/LaunchAgents/com.tradingskills.*.plist
 ```
+
+### Sizing and restrictions (added to `.env`)
+
+| `TRADING_CAPITAL` | Rupees the desk may deploy. Every share count derives from it. |
+| `RISK_PCT` | Percent of capital risked per trade (default 1.0). |
+| `MAX_HEAT_PCT` | Total open risk allowed across all positions (default 6.0). |
+| `BROKER` | Charges calculator profile: `zerodha`, `groww`, `angelone`, `upstox`, `dhan`. |
