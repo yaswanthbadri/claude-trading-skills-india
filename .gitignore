@@ -28,3 +28,7 @@ data/recommendations.json
 data/universe.csv.tmp
 logs/
 reports/
+
+# Nightly state snapshots
+data/backups/
+data/results_dates.json

@@ -437,6 +437,23 @@ def collect(capital: float = 500_000, risk_pct: float = 1.0,
             "liquidity_cr": s["liquidity_cr"],
             "from_pivot_pct": s["from_pivot_pct"],
         })
+    # A breakout three sessions before results is a coin flip, not a setup.
+    # The date goes on the card so the gap risk is visible before the order.
+    try:
+        import results_dates as rd
+        cal = rd.annotate([p["symbol"] for p in plans])
+        for p in plans:
+            row = cal.get(p["symbol"]) or {}
+            p["results_date"] = row.get("date")
+            p["results_sessions"] = row.get("sessions")
+            p["results_source"] = row.get("source")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] results dates unavailable: {exc}", file=sys.stderr)
+        for p in plans:
+            p["results_date"] = None
+            p["results_sessions"] = None
+            p["results_source"] = "unknown"
+
     data["plans"] = plans
     data["params"] = {"capital": capital, "risk_pct": risk_pct,
                       "watchlist": WATCHLIST, "candidates": candidates}

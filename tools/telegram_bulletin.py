@@ -251,6 +251,21 @@ def msg_plan(p: dict) -> str:
         f"<i>limit {n(p['limit'])} — never pay more</i>",
         f"<b>Stop</b>  {n(p['stop'])}  ({pct(-(p['stop_pct'] or 0))}, {esc(p['stop_method'] or '')})",
     ]
+    _rd = p.get("results_date")
+    if _rd:
+        try:
+            from datetime import date as _d
+            _rd = _d.fromisoformat(str(_rd)).strftime("%d %b")
+        except Exception:
+            pass
+        _n = p.get("results_sessions")
+        _lbl = "confirmed" if p.get("results_source") == "confirmed" else "estimated"
+        _when = f"{_rd} ({_n} sessions, {_lbl})" if _n is not None else f"{_rd} ({_lbl})"
+        if _n is not None and _n <= 5:
+            lines.append(f"⚠️ <b>Results {esc(_when)}</b> — gap risk inside the window")
+        else:
+            lines.append(f"<i>Results {esc(_when)}</i>")
+
     for i, t in enumerate((p.get("targets") or [])[:2], 1):
         lines.append(f"<b>Target {i}</b>  {n(t['price'])}  "
                      f"({pct(t['pct'], 1)} · {int(t['r'])}R · net {money(t['net'])})")
@@ -329,8 +344,19 @@ def msg_calls(d: dict) -> str:
         out.append(f"Hit a target <b>{card['wins']}/{card['decided']}</b> "
                    f"({_pct0(card.get('hit_rate_pct'))})")
     if card.get("avg_r") is not None:
-        out.append(f"Average <b>{card['avg_r']:+.1f}R</b> · total "
-                   f"{card['total_r']:+.1f}R")
+        line = f"Average <b>{card['avg_r']:+.1f}R</b> · total {card['total_r']:+.1f}R"
+        if card.get("avg_net_r") is not None:
+            line += f" · <i>after costs {card['avg_net_r']:+.1f}R</i>"
+        out.append(line)
+
+    buckets = (card.get("attribution") or {}).get("buckets") or []
+    if buckets:
+        best = max(buckets, key=lambda b: b.get("avg_net_r") or -99)
+        worst = min(buckets, key=lambda b: b.get("avg_net_r") or 99)
+        out.append(f"Best slice <b>{esc(str(best['value']))}</b> "
+                   f"({best['avg_net_r']:+.1f}R, {best['n']}) · "
+                   f"worst <b>{esc(str(worst['value']))}</b> "
+                   f"({worst['avg_net_r']:+.1f}R, {worst['n']})")
 
     closed = card.get("closed_rows") or []
     if closed:

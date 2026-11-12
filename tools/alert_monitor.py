@@ -10,7 +10,10 @@ What this replaced, and why
 
     If it cannot name the stock, it does not send anything.
 
-Two scanners
+Three scanners
+    LEVELS  the positions we already told you to take: stop, T1, T2 and
+            unfilled triggers. This is the only alert about money you have
+            at risk, so it runs first.
     EVENTS  A headline is matched to one listed company, the event type must be
             one that reprices a stock (results, order win, regulatory action,
             rating change, deal, fraud, guidance), and the card carries the
@@ -725,6 +728,14 @@ def main() -> int:
         return 0
 
     sent = []
+    if not news_only:
+        # Levels before headlines: a stop breach is more urgent than any story.
+        try:
+            import levels_watch
+            sent += [f"level:{s}" for s in levels_watch.scan(dry=dry)]
+        except Exception as exc:  # noqa: BLE001
+            print(f"[warn] level watch failed: {exc}", file=sys.stderr)
+
     if not prices_only:
         sent += scan_events(state, dry)
 

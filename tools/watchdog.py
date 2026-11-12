@@ -49,6 +49,29 @@ def _log(msg: str) -> None:
         f.write(line + "\n")
 
 
+def _tell(text: str, dry: bool = False) -> None:
+    """Say something to the owner. A failure nobody hears about is a silent one.
+
+    Repairs go to the owner only: they are operational, not market content, and
+    the other subscribers should not learn that the Mac was asleep.
+    """
+    if dry:
+        _log("would notify (dry run, nothing sent): " + text.splitlines()[0])
+        return
+    try:
+        import os
+
+        import notify
+        notify.load_env()
+        chat = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
+        if not chat:
+            return
+        res = notify.send(text, chat_id=chat)
+        _log(f"notified owner: {res}")
+    except Exception as exc:  # noqa: BLE001
+        _log(f"[warn] could not notify: {exc}")
+
+
 def _reports_today(mode: str) -> list[Path]:
     day = date.today().isoformat()
     return sorted(REPORTS.glob(f"bulletin_{mode}_{day}_*.json"))
@@ -120,12 +143,21 @@ def main() -> int:
                 actions.append(("daily", "morning plan missing"))
             else:
                 _log("gap: no morning plan today and it is too late to publish one")
+                _tell("⚠️ <b>No morning plan today</b>\n"
+                      "The 09:00 run never happened and it is now too late to "
+                      "publish levels that would already be stale, so nothing "
+                      "was sent. Yesterday's plan is the last valid one.",
+                      dry=args.dry_run)
 
         if now.hour * 60 + now.minute >= 16 * 60 + 10 and not _reports_today("eod"):
             if now.hour * 60 + now.minute <= 19 * 60:
                 actions.append(("eod", "closing review missing"))
             else:
                 _log("gap: no closing review today and it is too late to publish one")
+                _tell("⚠️ <b>No closing review today</b>\n"
+                      "The 16:00 run never happened. The scorecard will catch up "
+                      "on the next session; no verdicts were invented.",
+                      dry=args.dry_run)
 
     expected = cal.last_session_bar(now=now).isoformat()
     last = _cache_last_bar()
@@ -135,7 +167,16 @@ def main() -> int:
 
     for mode, why in actions:
         _log(f"{why} — rebuilding")
-        _run(mode, args.dry_run)
+        ok = _run(mode, args.dry_run)
+        if args.dry_run:
+            continue
+        if ok:
+            _tell(f"🔧 <b>Desk repair</b>\n{why}. Rebuilt just now ({mode}).\n"
+                  f"<i>This usually means the machine was asleep at the scheduled "
+                  f"time.</i>")
+        else:
+            _tell(f"✖ <b>Desk repair failed</b>\n{why}, and the rebuild did not "
+                  f"succeed. Check logs/watchdog.log.")
 
     if not actions and (last or "") >= expected:
         _log("nothing to do")

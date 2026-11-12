@@ -72,6 +72,9 @@ JOBS = [
     ("cache-close", "15:40", "build_cache.py", [], False, 30),
     ("eod", "16:00", "daily_bulletin.py", ["--mode", "eod"], False, 180),
     ("cache-night", "19:30", "build_cache.py", [], False, 240),
+    # Every day: the track record and the subscriber list are the only state
+    # that cannot be rebuilt, and people join on weekends.
+    ("backup", "19:45", "backup.py", [], True, 180),
 ]
 
 ALERT_EVERY = 300          # seconds
@@ -104,6 +107,19 @@ def log(msg: str) -> None:
     print(line, flush=True)
 
 
+def alert_owner(text: str) -> None:
+    """A job that dies silently is worse than one that never ran."""
+    try:
+        import notify
+        import os
+        notify.load_env()
+        chat = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
+        if chat:
+            notify.send(text, chat_id=chat)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def run_job(name: str, script: str, args: list[str], timeout: int = 1800) -> bool:
     t0 = time.time()
     cmd = [PYTHON, str(TOOLS / script), *args]
@@ -116,11 +132,14 @@ def run_job(name: str, script: str, args: list[str], timeout: int = 1800) -> boo
         if r.returncode != 0:
             err = (r.stderr or "").strip().splitlines()[-3:]
             log(f"✖ {name} exit {r.returncode}: {' | '.join(err)[:400]}")
+            alert_owner(f"✖ <b>{name} failed</b> on the desk (exit "
+                        f"{r.returncode}).\n<i>{' | '.join(err)[:300]}</i>")
             return False
         log(f"✔ {name} in {time.time() - t0:.0f}s")
         return True
     except subprocess.TimeoutExpired:
         log(f"✖ {name} timed out after {timeout}s")
+        alert_owner(f"✖ <b>{name} timed out</b> after {timeout}s.")
         return False
     except Exception as exc:  # noqa: BLE001
         log(f"✖ {name} crashed: {exc}")

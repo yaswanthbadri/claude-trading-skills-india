@@ -63,8 +63,9 @@ All times IST, enforced inside the container regardless of server timezone:
 | 09:15 → 15:15 | hourly bulletin |
 | 15:40 | cache refresh after the close |
 | 16:00 | **closing review + scorecard of our own calls** |
-| every 5 min, 24×7 | news and index alerts |
+| every 5 min, 24×7 | stock-event alerts and open-position levels |
 | 19:30 | cache backstop |
+| 19:45 | backup of the track record, sent off-machine |
 
 Weekends and NSE holidays are skipped in code (`tools/market_calendar.py`).
 

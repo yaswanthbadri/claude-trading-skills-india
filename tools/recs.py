@@ -115,7 +115,10 @@ def record(data: dict, source: str | None = None) -> int:
     first_session = live_from(published)
     added = 0
 
-    def add(symbol, plan, src, structure, score=None):
+    regime = ((data.get("regime") or {}).get("label") or "")
+
+    def add(symbol, plan, src, structure, score=None, base_type=None,
+            base_grade=None, sector=None):
         nonlocal added
         if not symbol or not plan or not plan.get("entry"):
             return
@@ -131,6 +134,8 @@ def record(data: dict, source: str | None = None) -> int:
             "stop": _f(plan.get("stop")), "t1": _f(plan.get("t1")),
             "t2": _f(plan.get("t2")), "hundred": _f(plan.get("hundred")),
             "qty": plan.get("qty"), "score": score,
+            "base_type": base_type, "base_grade": base_grade,
+            "sector": sector, "regime": regime,
             "published_at": published, "live_from": first_session,
             "status": "pending_fill", "fill_date": None, "fill_price": None,
             "exit_date": None, "exit_price": None, "exit_reason": None,
@@ -156,12 +161,16 @@ def record(data: dict, source: str | None = None) -> int:
             "t2": targets[1]["price"] if len(targets) > 1 else None,
             "qty": p.get("qty"),
         }
-        add(p.get("symbol"), plan, "plan", p.get("base_state") or "breakout")
+        add(p.get("symbol"), plan, "plan", p.get("base_state") or "breakout",
+            base_type=p.get("base_type"), base_grade=p.get("base_grade"),
+            sector=p.get("sector"))
 
     for c in (data.get("deep") or {}).get("candidates") or []:
         p = c.get("plan") or {}
         add(c.get("symbol"), p, "deep", c.get("structure"),
-            score=c.get("score"))
+            score=c.get("score"), base_type=(c.get("base") or {}).get("type"),
+            base_grade=(c.get("base") or {}).get("grade"),
+            sector=c.get("sector"))
 
     save(store)
     return added
@@ -280,6 +289,51 @@ def evaluate() -> dict:
 # ---------------------------------------------------------------------------
 # scorecard
 # ---------------------------------------------------------------------------
+CHARGES_SCRIPT = REPO / "skills" / "trading-costs" / "scripts" / "charges.py"
+
+
+def _round_trip_charges(buy: float, sell: float, qty: float) -> float | None:
+    """Real Indian delivery charges for the trade, in rupees.
+
+    Uses the same calculator the reports quote, so the scorecard and the plan
+    card cannot disagree about what a trade costs.
+    """
+    if not buy or not sell or not qty or qty <= 0:
+        return None
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("charges", CHARGES_SCRIPT)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        res = mod.calculate("delivery", buy=buy, sell=sell, qty=qty, broker="zerodha")
+        return float(res["total_charges"])
+    except Exception:
+        return None
+
+
+def net_r(rec: dict) -> float | None:
+    """R after costs. Gross R flatters a small account and hides a thin edge.
+
+    On a 5% stop, a round trip costs roughly 0.3-0.5% of turnover, which is
+    about 0.08R. That is the difference between an edge and a hobby.
+    """
+    r = rec.get("r_realized")
+    fill = rec.get("fill_price") or rec.get("entry")
+    stop = rec.get("stop")
+    exit_px = rec.get("exit_price")
+    qty = rec.get("qty")
+    if r is None or not fill or not stop or fill <= stop or not exit_px:
+        return None
+    q = float(qty) if qty else 100.0
+    risk = (fill - stop) * q
+    if risk <= 0:
+        return None
+    fees = _round_trip_charges(fill, exit_px, q)
+    if fees is None:
+        return round(float(r), 2)
+    return round(float(r) - fees / risk, 2)
+
+
 def _r_for(rec: dict, last_close: float | None) -> float | None:
     entry, stop = rec.get("fill_price") or rec.get("entry"), rec.get("stop")
     if not entry or not stop or entry <= stop:
@@ -342,6 +396,10 @@ def scorecard(sessions: int = 20) -> dict:
             "last_close": last_close, "notes": r.get("notes") or [],
         })
 
+    # Net R is the honest number: gross R ignores what the broker and the
+    # government take. Both are reported so the gap is visible.
+    net_rs = [x for x in (net_r(r) for r in decided) if x is not None]
+
     return {
         "as_of": today,
         "new_today": len(new_today),
@@ -357,12 +415,83 @@ def scorecard(sessions: int = 20) -> dict:
         "hit_rate_pct": round(100 * len(wins) / len(decided), 0) if decided else None,
         "avg_r": round(sum(rs) / len(rs), 2) if rs else None,
         "total_r": round(sum(rs), 1) if rs else None,
+        "avg_net_r": round(sum(net_rs) / len(net_rs), 2) if net_rs else None,
+        "attribution": attribution(decided, window),
         "best": max(decided, key=lambda x: x.get("r_realized") or -9, default=None),
         "worst": min(decided, key=lambda x: x.get("r_realized") or 9, default=None),
         "rows": rows,
         "open_rows": [x for x in rows if x["status"] in ("filled", "t1_hit")],
         "closed_rows": [x for x in rows if x["status"] not in ("filled", "t1_hit")],
     }
+
+
+def _bucket(rows: list[dict]) -> dict:
+    """n, wins, avg gross R and avg net R for one slice of the book."""
+    rs = [r["r_realized"] for r in rows if r.get("r_realized") is not None]
+    nets = [x for x in (net_r(r) for r in rows) if x is not None]
+    wins = [r for r in rows if r["status"] in ("t1_hit", "t2_hit")]
+    return {
+        "n": len(rows),
+        "wins": len(wins),
+        "hit_rate_pct": round(100 * len(wins) / len(rows)) if rows else None,
+        "avg_r": round(sum(rs) / len(rs), 2) if rs else None,
+        "avg_net_r": round(sum(nets) / len(nets), 2) if nets else None,
+    }
+
+
+def attribution(decided: list[dict], window: list[dict],
+                min_n: int = 3) -> dict:
+    """Which setups actually pay: base type, base grade, regime, sector.
+
+    One aggregate R cannot tell you to stop publishing loose bases in a
+    weakening market. Buckets only appear once they hold `min_n` decided
+    trades, so nothing is inferred from a single lucky outcome.
+    """
+    if not decided:
+        return {"buckets": [], "note": "no decided trades yet"}
+
+    dims = [("base_type", "Base"), ("base_grade", "Grade"),
+            ("regime", "Regime"), ("sector", "Sector")]
+    buckets = []
+    for key, label in dims:
+        groups: dict[str, list[dict]] = {}
+        for r in decided:
+            v = (r.get(key) or "").strip()
+            if not v:
+                continue
+            groups.setdefault(v, []).append(r)
+        for v, rows in groups.items():
+            if len(rows) < min_n:
+                continue
+            b = _bucket(rows)
+            b.update({"dimension": label, "value": v})
+            buckets.append(b)
+
+    buckets.sort(key=lambda b: (b["dimension"], -(b["avg_net_r"] or -9)))
+    return {"buckets": buckets,
+            "decided": len(decided),
+            "sessions": len({r["date"] for r in window}),
+            "note": "" if buckets else f"no bucket has {min_n} decided trades yet"}
+
+
+def _results_soon(rows: list[dict], within: int = 7) -> list[str]:
+    """'CENTUM reports 18 Nov (3 sessions)' for open positions, if known."""
+    if not rows:
+        return []
+    try:
+        import results_dates as rd
+        cal = rd.annotate([r["symbol"] for r in rows])
+    except Exception:
+        return []
+    out = []
+    for r in rows:
+        row = cal.get(r["symbol"]) or {}
+        n = row.get("sessions")
+        if n is None or n > within:
+            continue
+        label = "confirmed" if row.get("source") == "confirmed" else "estimated"
+        out.append(f"{r['symbol']} on {row['date']} ({n} sessions, {label})")
+    return out
 
 
 def focus_list(data: dict, card: dict) -> list[str]:
@@ -382,6 +511,14 @@ def focus_list(data: dict, card: dict) -> list[str]:
     if nofill:
         out.append(f"{len(nofill)} gapped past the chase limit — chasing those is how "
                    "accounts bleed; wait for the next pivot.")
+    # Results inside a holding window are a scheduled gap risk, not a surprise.
+    # This is the one bullet that can save a full R, so it goes near the top.
+    soon = _results_soon(card.get("open_rows") or [], within=7)
+    if soon:
+        out.append("Results inside the holding window: " + "; ".join(soon)
+                   + ". A stop does not fill through a gap — decide before the "
+                     "print, not after it.")
+
     reg = (data.get("regime") or {})
     if reg.get("label"):
         out.append(f"Regime into tomorrow: {reg['label']}, exposure ceiling "

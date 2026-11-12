@@ -9,6 +9,7 @@ Jobs
     com.tradingskills.bot        Telegram listener, kept alive (interim)
     com.tradingskills.watchdog   fills gaps a sleeping Mac left behind
     com.tradingskills.cache      candle cache refresh, hourly + post-close
+    com.tradingskills.backup     nightly snapshot of the track record, 19:45
 
 Holiday handling is inside the scripts, not here (a holiday list changes).
 
@@ -127,6 +128,17 @@ def build_plists() -> dict[str, str]:
         + _calendar(watchdog_entries)
         + f"  <key>StandardOutPath</key>\n  <string>{LOGS / 'watchdog.log'}</string>\n"
         + f"  <key>StandardErrorPath</key>\n  <string>{LOGS / 'watchdog.log'}</string>\n"
+        + FOOTER
+    )
+
+    # The scorecard is the one thing a disk failure cannot rebuild. Every day,
+    # not just trading days: subscribers change on weekends too.
+    backup_entries = [{"Weekday": d, "Hour": 19, "Minute": 45} for d in range(7)]
+    plists["com.tradingskills.backup"] = (
+        _base("com.tradingskills.backup", "backup.py", [])
+        + _calendar(backup_entries)
+        + f"  <key>StandardOutPath</key>\n  <string>{LOGS / 'backup.log'}</string>\n"
+        + f"  <key>StandardErrorPath</key>\n  <string>{LOGS / 'backup.log'}</string>\n"
         + FOOTER
     )
 

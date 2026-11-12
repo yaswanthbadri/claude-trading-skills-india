@@ -88,6 +88,33 @@ def risk_label(k: str) -> str:
     return RISK_LABELS.get(k, k.replace("_", " ").title())
 
 
+def results_note(p: dict, markdown: bool = True) -> str:
+    """One line about the next results date, loud when it is close.
+
+    A confirmed date is stated as fact; an inferred one is labelled, because
+    acting on a guess without knowing it is a guess is how people get hurt.
+    """
+    d = p.get("results_date")
+    if not d:
+        return ""
+    try:
+        from datetime import date as _d
+        d = _d.fromisoformat(str(d)).strftime("%d %b %Y")
+    except Exception:
+        pass
+    n = p.get("results_sessions")
+    label = "confirmed" if p.get("results_source") == "confirmed" else "estimated"
+    when = f"{d} ({n} session{'s' if n != 1 else ''}, {label})" if n is not None \
+        else f"{d} ({label})"
+    if n is not None and n <= 5:
+        if markdown:
+            return (f"⚠️ **Results {when}** — inside the holding window. A stop "
+                    f"cannot protect you through a gap; size down or wait.")
+        return (f"Results {when} — inside the holding window. A stop cannot "
+                f"protect you through a gap; size down or wait.")
+    return f"Results {when}."
+
+
 def plan_verdict(p: dict) -> tuple[str, str]:
     """Return (label, css class) for a trade plan."""
     fp = p.get("from_pivot_pct")
@@ -260,6 +287,27 @@ def _calls_md(d: dict, sec=None) -> list[str]:
                 "None has reached a target or a stop yet — the sample is still open."))
     L.append("")
 
+    if card.get("decided") and card.get("avg_net_r") is not None:
+        L.append(f"After brokerage, STT and DP charges the average is "
+                 f"{_r_fmt(card['avg_net_r'])} rather than {_r_fmt(card['avg_r'])}. "
+                 f"Small per trade, decisive over a hundred.")
+        L.append("")
+
+    att = card.get("attribution") or {}
+    if att.get("buckets"):
+        L.append("### Which setups actually pay")
+        L.append("")
+        L.append("| Slice | Trades | Hit rate | Avg R | After costs |")
+        L.append("|---|---|---|---|---|")
+        for b in att["buckets"]:
+            L.append(f"| {b['dimension']}: {b['value']} | {b['n']} | "
+                     f"{_pct0(b.get('hit_rate_pct'))} | {_r_fmt(b.get('avg_r'))} | "
+                     f"{_r_fmt(b.get('avg_net_r'))} |")
+        L.append("")
+        L.append(f"_A slice appears once it holds 3 decided trades. "
+                 f"{att.get('decided', 0)} decided so far._")
+        L.append("")
+
     closed = card.get("closed_rows") or []
     L.append("### Closed today")
     L.append("")
@@ -322,6 +370,21 @@ def _calls_html(a, d: dict, h2) -> None:
          f"{_r_fmt(card['total_r'])} across the sample.</div>"
          if card.get("decided") else
          "None has reached a target or a stop yet.</div>"))
+
+    if card.get("decided") and card.get("avg_net_r") is not None:
+        a(f"<p class='small'>After brokerage, STT and DP the average is "
+          f"<b>{_r_fmt(card['avg_net_r'])}</b> rather than "
+          f"{_r_fmt(card['avg_r'])}. Small per trade, decisive over a hundred.</p>")
+
+    att = card.get("attribution") or {}
+    if att.get("buckets"):
+        a("<div class='dhd'>Which setups actually pay</div>")
+        rows = [[f"{b['dimension']}: {b['value']}", str(b["n"]),
+                 _pct0(b.get("hit_rate_pct")), _r_fmt(b.get("avg_r")),
+                 _r_fmt(b.get("avg_net_r"))] for b in att["buckets"]]
+        a(_table(["Slice", "Trades", "Hit rate", "Avg R", "After costs"], rows))
+        a(f"<p class='small'>A slice appears once it holds 3 decided trades. "
+          f"{att.get('decided', 0)} decided so far.</p>")
 
     closed = card.get("closed_rows") or []
     a("<div class='dhd'>Closed today</div>")
@@ -592,6 +655,9 @@ def render_md(d: dict) -> str:
               f"base grade {p['base_grade']}_")
             a("")
             a(f"- Close {_n(p['close'])} · pivot {_n(p['pivot'])} · {_pct(p['from_pivot_pct'])} from pivot")
+            _res = results_note(p)
+            if _res:
+                a(f"- {_res}")
             a(f"- **Buy above {_n(p['trigger'])}** (limit {_n(p['limit'])})")
             a(f"- **Stop {_n(p['stop'])}** ({_pct(-(p['stop_pct'] or 0))} from trigger, {p['stop_method']})")
             a(f"- Size: {p['qty']} shares, {_money(p['position_value'])} "
@@ -1137,6 +1203,12 @@ footer{
               f"{_h.escape(str(b.get('grade') or ''))} · {_n(b.get('weeks'), 1)} weeks · "
               f"{_h.escape(c.get('structure') or '')} entry · "
               f"₹{_n(c.get('liquidity_cr'), 0)} crore/day</span></div>")
+            _res = results_note(p, markdown=False)
+            if _res:
+                _hot = (p.get("results_sessions") is not None
+                        and p.get("results_sessions") <= 5)
+                a(f"<div class='callout{' warn' if _hot else ''}' "
+                  f"style='margin:10px 0 0'>{_h.escape(_res)}</div>")
             a("<div class='plan-body'><div class='lvls'>")
             a(f"<div class='lvl entry'><div class='k'>Buy above</div>"
               f"<div class='v'>{_n(p.get('entry'))}</div>"
@@ -1222,6 +1294,12 @@ footer{
               f"{' · ' if p.get('sector') else ''}"
               f"{_h.escape(vlabel)} · close {_n(p['close'])} · "
               f"pivot {_n(p['pivot'])} ({_pct(p['from_pivot_pct'])})</span></div>")
+            _res = results_note(p, markdown=False)
+            if _res:
+                _hot = (p.get("results_sessions") is not None
+                        and p.get("results_sessions") <= 5)
+                a(f"<div class='callout{' warn' if _hot else ''}' "
+                  f"style='margin:10px 0 0'>{_h.escape(_res)}</div>")
             a("<div class='plan-body'><div class='lvls'>")
             a(f"<div class='lvl entry'><div class='k'>Buy above</div>"
               f"<div class='v'>{_n(p['trigger'])}</div>"
