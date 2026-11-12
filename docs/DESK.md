@@ -76,7 +76,22 @@ never the plan.
 high if it has no base, or the next 2% up if it is already through the obvious level. You get one
 message when it clears that level, once a day, addressed to you and nobody else.
 
-## 3. How a call is graded
+## 3. Base rates
+
+`/check` measures what followed the same situation before, over every name in
+the local cache: a +5% day on 1.5x volume in an uptrend, a close above the
+20-day range high, a pullback into the 20-day average that held, a 15% run in
+10 sessions, a stock already 15% above its range high.
+
+For each, the forward return at 5, 10 and 20 sessions is kept — how often it
+worked, the median outcome, and the spread. The same measurement is run for
+the single stock in front of you, because a stock's own record is more
+relevant than the market's average.
+
+These are base rates, not forecasts. The market figure counts stock-days, not
+independent events, and the card says so.
+
+## 4. How a call is graded
 
 The desk publishes, stores, and then replays. A plan is keyed on the session it is *for*, not the
 day it was published.
@@ -88,7 +103,7 @@ day it was published.
 - Only `daily` and `eod` runs record new plans; intraday grades the book and never rewrites it.
 - Net R is after Indian charges, not before.
 
-## 4. Where things live
+## 5. Where things live
 
 | File | Job |
 |---|---|
@@ -96,6 +111,9 @@ day it was published.
 | `tools/bulletin_data.py` | collects candidates, heat cap, delivery, tradability |
 | `tools/bulletin_render.py` | renders cards and the styled HTML — one source of truth for verdicts |
 | `tools/stock_check.py` | the single-symbol pipeline behind `/check` |
+| `tools/forward_plan.py` | what to do with a stock in its current state |
+| `tools/tech_detail.py` | RSI, ATR, ADX, moving averages, volume, extension |
+| `tools/base_rates.py` | what happened after the same setup, market-wide and per stock |
 | `tools/alert_monitor.py` | news events, price shocks, watchlist pings |
 | `tools/levels_watch.py` | stop / T1 / T2 breaches on the open book |
 | `tools/recs.py` | the book: record, replay, scorecard, attribution |
@@ -111,7 +129,7 @@ day it was published.
 State lives in `data/` (gitignored): `recommendations.json`, `subscribers.json`, `candles/`,
 `breaks.json`, `tradability.json`, `delivery/`, `backups/`. Logs in `logs/`, reports in `reports/`.
 
-## 5. Settings
+## 6. Settings
 
 All optional, all in `.env` (see `.env.example`):
 
@@ -125,7 +143,7 @@ All optional, all in `.env` (see `.env.example`):
 | `TELEGRAM_BOT_TOKEN` | — | required |
 | `TELEGRAM_INVITE_CODE` | — | if set, `/start` needs it |
 
-## 6. Tests
+## 7. Tests
 
 ```bash
 /opt/homebrew/bin/python3 -m unittest discover -s tests -p 'test_desk*.py'

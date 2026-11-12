@@ -891,6 +891,45 @@ def render_html_safe(d: dict, title: str) -> str:
                 f"<body>{body}</body></html>")
 
 
+def state_verdict(state: str, stage2: bool = False, base_grade: str | None = None,
+                  tt_passed: int | None = None, from_pivot_pct: float | None = None,
+                  plans: list | None = None) -> tuple[str, str]:
+    """The call for a stock that is not sitting at a fresh pivot.
+
+    The old card said "MISSED — above chase limit" for a stock that had just
+    broken out on volume. True, and useless: the reader wanted to know what to
+    do next, not what had already happened. These labels say what the trade
+    is, now.
+
+    Returns (verdict, css) where css is ok / warn / bad.
+    """
+    plans = plans or []
+
+    if state == "breakout_today":
+        best = plans[0] if plans else {}
+        if best.get("stop_quality") == "capped inside the base":
+            return ("BREAKOUT — but the stop does not fit", "warn")
+        return ("BREAKOUT TODAY — buy the retest, not the spike", "ok")
+    if state == "extended":
+        if plans:
+            return ("ALREADY RAN — no chase; wait for the pullback", "warn")
+        return ("ALREADY RAN — wait for a new base", "warn")
+    if state == "at_pivot":
+        return plan_verdict({
+            "stage2": bool(stage2),
+            "from_pivot_pct": from_pivot_pct,
+            "base_grade": base_grade,
+            "tt_passed": tt_passed,
+        })
+    if state == "pre_breakout":
+        return ("WATCH — inside the base, wait for the pivot", "warn")
+    if state == "failed":
+        return ("SETUP FAILED — the base low broke, the idea is dead", "bad")
+    if state == "no_base":
+        return ("WATCH ONLY — no base to trade", "warn")
+    return ("NO DATA", "warn")
+
+
 def verdict(reg: dict) -> str:
     label = (reg.get("label") or "").lower()
     if "confirmed" in label:

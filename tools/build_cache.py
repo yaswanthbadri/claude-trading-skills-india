@@ -243,6 +243,18 @@ def main() -> int:
     print(f"\ncache: {r['written']} updated, {r['up_to_date']} already current, "
           f"{r['skipped']} no-data, {r['failed']} failed, {r['seconds']}s "
           f"for {r['total']} symbols")
+
+    # The base rates are measured from these candles, so they are rebuilt once
+    # the cache has moved. It takes about ten seconds over 2,400 names.
+    if not args.limit:
+        try:
+            import base_rates
+            data = base_rates.build(verbose=False)
+            data["signature"] = base_rates._signature()
+            base_rates.save_cache(data)
+            print(f"base rates: rebuilt for {data['symbols_with_history']} names")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[warn] base rates not rebuilt: {exc}", file=sys.stderr)
     return 0
 
 

@@ -294,12 +294,37 @@ def watch_text(chat_id) -> str:
 # ---------------------------------------------------------------------------
 # /check
 # ---------------------------------------------------------------------------
-def check_text(symbol: str) -> str:
+def check_cards(symbol: str) -> list[str]:
+    """The chat answer: the call first, then the numbers behind it."""
     try:
         import stock_check
-        return stock_check.card(stock_check.check(symbol))
+        return stock_check.cards(stock_check.check(symbol))
     except Exception as exc:  # noqa: BLE001
-        return f"⚠️ Check failed for {_esc(symbol)}: {_esc(exc)}"
+        return [f"⚠️ Check failed for {_esc(symbol)}: {_esc(exc)}"]
+
+
+def check_text(symbol: str) -> str:
+    return "\n\n".join(check_cards(symbol))
+
+
+def _send_check(tok: str, chat_id, symbol: str) -> None:
+    """Two cards and the full report as a document.
+
+    The detail is the point — a verdict without the numbers behind it is a
+    rumour — but the cards have to stay readable on a phone, so the long
+    version goes out as a styled HTML file.
+    """
+    try:
+        import stock_check
+        result = stock_check.check(symbol)
+        for c in stock_check.cards(result):
+            _reply(tok, chat_id, c)
+        path = stock_check.report_file(symbol, result)
+        if path:
+            notify.send_document(tok, chat_id, path,
+                                 f"Full report — {symbol.upper()}")
+    except Exception as exc:  # noqa: BLE001
+        _reply(tok, chat_id, f"⚠️ Check failed for {_esc(symbol)}: {_esc(exc)}")
 
 
 # ---------------------------------------------------------------------------
@@ -452,7 +477,7 @@ def handle_command(tok: str, chat_id, cmd: str, arg: str, name: str,
             return
         subscribers.touch(chat_id)
         _reply(tok, chat_id, "🔎 checking…")
-        _reply(tok, chat_id, check_text(arg))
+        _send_check(tok, chat_id, arg)
         return
 
     if cmd in ("book", "positions"):
@@ -591,7 +616,7 @@ def handle_callback(tok: str, update: dict) -> None:
         return
     if verb == "check":
         _answer_cb(tok, cb_id, f"Checking {arg}…")
-        _reply(tok, chat_id, check_text(arg))
+        _send_check(tok, chat_id, arg)
         return
     if verb == "unwatch":
         ok = subscribers.unwatch(chat_id, arg)

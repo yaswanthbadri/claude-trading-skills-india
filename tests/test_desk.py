@@ -499,47 +499,78 @@ class TestBotCards(unittest.TestCase):
         import stock_check
         r = {
             "symbol": "CENTUM", "name": "CENTUM", "close": 4239.5,
-            "verdict": "BUY-READY", "css": "ok",
-            "stage2": True, "tt_passed": 6, "tt_total": 6, "tt_failed": [],
+            "live": 4239.5, "verdict": "BUY-READY", "css": "good",
+            "state": "at_pivot", "state_text": "At the pivot (4230.00)",
+            "trend": {"stage2": True, "passed": 6, "total": 6, "failed": [],
+                      "criteria": [], "rs_3m": 8.0},
             "base": {"type": "VCP", "grade": "A", "weeks": 6.6, "depth": 26.6,
-                     "pivot": 4230.0, "from_pivot_pct": 0.2},
+                     "pivot": 4230.0, "from_pivot_pct": 0.2,
+                     "cleared_on": "2026-11-02"},
+            "tech": {"close": 4239.5, "change_pct": 1.9, "rsi": 54.8,
+                     "atr_pct": 4.65, "adx": 16.0, "vol_x50": 0.6,
+                     "avg_range_pct": 4.7, "position_52w_pct": 74.0,
+                     "from_sma20_pct": 4.4, "from_sma50_pct": 0.7,
+                     "from_sma200_pct": 25.7, "high_52w": 4999.5,
+                     "low_52w": 2044.2, "distribution_pct": 30,
+                     "measured_move_target": 5000.0,
+                     "from_measured_move_pct": -17.0,
+                     "days_since_breakout": 34,
+                     "gain_since_breakout_pct": 5.0,
+                     "breakout_date": "2026-09-22"},
             "gate": {"blockers": [], "notes": [], "band_pct": 20,
                      "series": "EQ"},
             "delivery": {"deliv_pct": 43, "multiple": None},
-            "results": {},
+            "results": {}, "why": ["the base is tight"],
+            "rates": {"market": {}, "symbol": {}, "matches": []},
             "held": {"status": "filled", "entry": 4238.5, "stop": 4008.4,
                      "t1": 5054.0},
-            "plan": {"trigger": 4238.5, "limit": 4356.9, "stop": 4008.4,
-                     "stop_method": "structure", "qty": 13,
-                     "position_value": 56640, "allocation_pct": 11.3,
-                     "warnings": ["stop is inside the base"],
-                     "targets": [{"r": 2.0, "price": 5054.0, "pct": 16.0},
-                                 {"r": 3.0, "price": 5402.5, "pct": 24.0}]},
+            "plans": [{
+                "kind": "breakout", "label": "Buy above the pivot",
+                "entry": 4238.5, "entry_zone": [4238.5, 4356.9],
+                "stop": 4008.4, "stop_pct": 5.4, "stop_pct_from_limit": 8.0,
+                "stop_capped": True, "stop_quality": "capped inside the base",
+                "qty": 13, "position_value": 56640, "allocation_pct": 11.3,
+                "risk": 4667, "risk_budget": 5000,
+                "targets": [{"r": 2.0, "price": 5054.0, "pct": 16.0},
+                            {"r": 3.0, "price": 5402.5, "pct": 24.0}],
+                "note": "a GTT fills only if the stock comes to it",
+            }],
         }
-        card = stock_check.card(r)
-        for must in ("CENTUM", "Stage 2", "VCP grade A", "Pivot", "Buy above",
-                     "Stop", "T1", "2R", "BUY-READY", "not advice",
-                     "Already on the book"):
+        card = stock_check.card_call(r)
+        for must in ("CENTUM", "Buy above", "Stop", "T1", "2R", "BUY-READY",
+                     "not SEBI-registered advice", "Already on the book",
+                     "At the pivot"):
             self.assertIn(must, card)
+        detail = stock_check.card_detail(r)
+        for must in ("RSI", "ADX", "ATR", "52-week", "Delivery",
+                     "Stage 2", "VCP grade A", "Pivot"):
+            self.assertIn(must, detail)
 
     def test_no_base_is_said_plainly_not_reported_as_a_grade(self):
         import stock_check
-        card = stock_check.card({
+        r = {
             "symbol": "TCS", "name": "TCS", "close": 2442.4,
             "verdict": "WATCH ONLY", "css": "warn", "stage2": False,
-            "tt_passed": 1, "tt_total": 5, "tt_failed": ["SMA200 rising"],
+            "state": "no_base", "state_text": "No base to trade",
+            "trend": {"stage2": False, "passed": 1, "total": 5,
+                      "failed": ["SMA200 rising"], "criteria": []},
             "base": {"type": None, "grade": None, "note": "no base yet"},
+            "tech": {}, "why": [], "plans": [],
+            "rates": {"market": {}, "symbol": {}, "matches": []},
             "gate": {"blockers": [], "notes": [], "series": "EQ"},
-            "delivery": {}, "results": {}, "held": None, "plan": {},
-        })
-        self.assertIn("no tight base", card)
+            "delivery": {}, "results": {}, "held": None,
+        }
+        card = stock_check.card_call(r)
         self.assertIn("no base yet", card)
+        self.assertIn("No trade to take right now", card)
         self.assertNotIn("Buy above", card)
+        detail = stock_check.card_detail(r)
+        self.assertIn("no tight base", detail)
 
     def test_an_error_is_one_line_not_a_traceback(self):
         import stock_check
-        self.assertIn("no data", stock_check.card(
-            {"error": "no data for NOPE — check the NSE symbol"}))
+        self.assertIn("no data", stock_check.cards(
+            {"error": "no data for NOPE — check the NSE symbol"})[0])
 
     def test_book_and_heat_cards_survive_an_empty_book(self):
         import bot_listener as bot
@@ -681,6 +712,182 @@ class TestReportSurvivesABrokenSection(unittest.TestCase):
         self.assertIn("4,008.40", card)
         self.assertIn("5,402.50", card)
 
+
+class TestTheStockStateIsNotAStalePivot(unittest.TestCase):
+    """The card used to offer a level the market had cleared weeks ago.
+
+    "Pivot 328.70 · now +17.1% from it" and then "Buy above 329.40" for a
+    stock at 384.80. Arithmetically right, practically useless, and it looked
+    actionable. These tests pin the fix.
+    """
+
+    def _detail(self):
+        return {
+            "close": 383.75, "change_pct": 8.4, "vol_x50": 1.86,
+            "ext_above_20d_high_pct": 5.4, "avg_range_pct": 4.4,
+            "sma20": 336.52, "hi20_prev": 364.0,
+            "days_since_breakout": 0, "gain_since_breakout_pct": 0.0,
+            "rsi": 73.3, "atr_pct": 4.12, "adx": 16.9,
+        }
+
+    def _rows(self):
+        """60 bars of history, then a shelf, then the breakout bar."""
+        base = []
+        for i in range(60):
+            c = 250.0 + i * 0.2
+            base.append({"date": f"2026-08-{i + 1:02d}", "open": c,
+                         "high": c + 2, "low": c - 2, "close": c,
+                         "volume": 4_000_000})
+        for i, (h, l, c) in enumerate([
+            (341.0, 329.60, 338.50), (344.0, 335.00, 341.25),
+            (342.0, 335.00, 338.90), (344.9, 335.65, 342.85),
+            (357.0, 343.25, 354.00),
+        ]):
+            base.append({"date": f"2026-11-{3 + i:02d}", "open": c, "high": h,
+                         "low": l, "close": c, "volume": 5_000_000})
+        base.append({"date": "2026-11-12", "open": 360.0, "high": 389.0,
+                     "low": 356.0, "close": 383.75, "volume": 34_757_896})
+        return base
+
+    def test_a_breakout_is_recognised_as_a_breakout_not_a_missed_pivot(self):
+        import forward_plan as fp
+        rows = self._rows()
+        orig = fp._rows
+        fp._rows = lambda sym: rows
+        try:
+            res = fp.analyse("TEST", self._detail(), {"pivot": 328.70},
+                             500_000, 1.0)
+        finally:
+            fp._rows = orig
+        self.assertEqual(res["state"], "breakout_today")
+        self.assertTrue(res["plans"])
+        best = res["plans"][0]
+        # the entry must be near the shelf, not 17% below the price
+        self.assertLess(abs(best["entry"] - 357.0), 1.0)
+        self.assertGreater(best["entry"], 340)
+        self.assertLess(best["stop"], best["entry"])
+        self.assertTrue(best["targets"])
+        for t in best["targets"]:
+            self.assertGreater(t["price"], best["entry"])
+
+    def test_an_extended_stock_gets_no_chase_entry(self):
+        import forward_plan as fp
+        detail = dict(self._detail(), vol_x50=0.8, change_pct=0.2)
+        rows = self._rows()
+        orig = fp._rows
+        fp._rows = lambda sym: rows
+        try:
+            res = fp.analyse("TEST", detail, {"pivot": 328.70}, 500_000, 1.0)
+        finally:
+            fp._rows = orig
+        self.assertEqual(res["state"], "extended")
+        for p in res["plans"]:
+            # any entry offered must not be the stale pivot
+            self.assertNotEqual(p["entry"], 328.70)
+            self.assertGreater(p["entry"], 300)
+            self.assertLess(p["entry"], 383.75)
+
+    def test_the_verdict_says_what_the_trade_is(self):
+        import bulletin_render as br
+        v, css = br.state_verdict("breakout_today", stage2=True,
+                                   base_grade="A", plans=[{}])
+        self.assertIn("BREAKOUT", v)
+        v2, _ = br.state_verdict("extended", stage2=True, base_grade="A",
+                                 plans=[])
+        self.assertIn("ALREADY RAN", v2)
+        v3, _ = br.state_verdict("at_pivot", stage2=True, base_grade="A",
+                                 tt_passed=6, from_pivot_pct=0.1)
+        self.assertEqual(v3, "BUY-READY")
+
+    def test_a_stop_that_had_to_be_pulled_in_says_so(self):
+        import forward_plan as fp
+        p = fp._plan("x", 100.0, 80.0, 500_000, 1.0, "test")
+        self.assertTrue(p["stop_capped"])
+        self.assertEqual(p["stop_quality"], "capped inside the base")
+        self.assertAlmostEqual(p["stop_pct"], 8.0, places=2)
+        self.assertEqual(p["structural_stop"], 80.0)
+
+    def test_a_stop_under_the_structure_is_not_capped(self):
+        import forward_plan as fp
+        p = fp._plan("x", 100.0, 94.0, 500_000, 1.0, "test")
+        self.assertFalse(p["stop_capped"])
+        self.assertEqual(p["stop_quality"], "structure")
+        self.assertEqual(p["stop"], 94.0)
+
+    def test_the_size_risk_is_the_budget_and_the_qty_is_whole(self):
+        import forward_plan as fp
+        p = fp._plan("x", 357.0, 329.60, 500_000, 1.0, "test")
+        self.assertGreater(p["qty"], 0)
+        self.assertEqual(p["qty"], int(p["qty"]))
+        self.assertLessEqual(p["risk"], p["risk_budget"] * 1.02)
+
+
+class TestBaseRates(unittest.TestCase):
+    """Statistics, not hunches — and honest about the sample."""
+
+    def test_the_market_table_is_built_from_the_cache(self):
+        import base_rates
+        data = base_rates.load_cache()
+        if not data:
+            self.skipTest("base rates cache not built")
+        market = data.get("market") or {}
+        self.assertTrue(market)
+        for sig, entry in market.items():
+            self.assertIn("h10", entry)
+            self.assertGreater(entry["h10"]["n"], 0)
+            self.assertIn("median", entry["h10"])
+            self.assertIn("hit", entry["h10"])
+
+    def test_a_signal_is_recognised_from_the_detail(self):
+        import base_rates
+        self.assertIn("up_day_volume", base_rates.matches(
+            {"change_pct": 8.4, "vol_x50": 1.9}))
+        self.assertIn("breakout_20d", base_rates.matches(
+            {"change_pct": 8.4, "vol_x50": 1.9, "close": 383.75,
+             "hi20_prev": 364.0}))
+        self.assertNotIn("up_day_volume", base_rates.matches(
+            {"change_pct": 1.0, "vol_x50": 0.9}))
+
+    def test_the_numbers_are_a_distribution_not_a_point(self):
+        import base_rates
+        st = base_rates._stats([1.0, -2.0, 3.0, 4.0])
+        self.assertEqual(st["n"], 4)
+        self.assertEqual(st["hit"], 75.0)
+        self.assertAlmostEqual(st["median"], 2.0)
+        self.assertLessEqual(st["p25"], st["median"])
+        self.assertGreaterEqual(st["p75"], st["median"])
+
+    def test_an_empty_sample_is_not_a_statistic(self):
+        import base_rates
+        self.assertEqual(base_rates._stats([]), {"n": 0})
+
+
+class TestTechnicalDetail(unittest.TestCase):
+    def test_atr_is_a_share_of_price_not_a_change(self):
+        import tech_detail
+        d = tech_detail.detail("CUPID")
+        if d.get("error"):
+            self.skipTest("no cache")
+        self.assertGreater(d["atr_pct"], 0)
+        self.assertLess(d["atr_pct"], 30)
+        self.assertGreater(d["vol_x50"], 0)
+        self.assertIsNotNone(d["rsi"])
+
+    def test_the_report_carries_the_numbers_not_just_a_label(self):
+        import stock_check
+        r = stock_check.check("CUPID")
+        if r.get("error"):
+            self.skipTest("no data")
+        detail = stock_check.card_detail(r)
+        for must in ("RSI", "ADX", "ATR", "52-week", "Delivery",
+                     "Base rates"):
+            self.assertIn(must, detail)
+        # the stale pivot must not be presented as an entry
+        self.assertNotIn("Buy above 329", detail)
+
+
+if __name__ == "__main__":
+    unittest.main()
 
 if __name__ == "__main__":
     unittest.main()
