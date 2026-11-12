@@ -7,6 +7,7 @@ Jobs
     com.tradingskills.eod        closing review, 16:00, Mon-Fri
     com.tradingskills.alerts     news + price alerts, every 5 minutes, 24x7
     com.tradingskills.bot        Telegram listener, kept alive (interim)
+    com.tradingskills.watchdog   fills gaps a sleeping Mac left behind
     com.tradingskills.cache      candle cache refresh, hourly + post-close
 
 Holiday handling is inside the scripts, not here (a holiday list changes).
@@ -114,6 +115,18 @@ def build_plists() -> dict[str, str]:
         + "  <key>RunAtLoad</key>\n  <true/>\n"
         + f"  <key>StandardOutPath</key>\n  <string>{LOGS / 'bot.log'}</string>\n"
         + f"  <key>StandardErrorPath</key>\n  <string>{LOGS / 'bot.log'}</string>\n"
+        + FOOTER
+    )
+
+    # Safety net: if the Mac was asleep at 09:00 or 16:00, this notices the
+    # missing report and rebuilds it once, inside a sensible window.
+    watchdog_entries = [{"Weekday": d, "Hour": h, "Minute": 25}
+                        for d in WEEKDAYS for h in (9, 10, 11, 12, 16, 17, 18)]
+    plists["com.tradingskills.watchdog"] = (
+        _base("com.tradingskills.watchdog", "watchdog.py", [])
+        + _calendar(watchdog_entries)
+        + f"  <key>StandardOutPath</key>\n  <string>{LOGS / 'watchdog.log'}</string>\n"
+        + f"  <key>StandardErrorPath</key>\n  <string>{LOGS / 'watchdog.log'}</string>\n"
         + FOOTER
     )
 

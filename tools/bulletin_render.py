@@ -91,10 +91,15 @@ def risk_label(k: str) -> str:
 def plan_verdict(p: dict) -> tuple[str, str]:
     """Return (label, css class) for a trade plan."""
     fp = p.get("from_pivot_pct")
+    grade = (p.get("base_grade") or "D").upper()
     if fp is not None and fp > 1.5:
         return "MISSED — above chase limit", "warn"
     if p.get("stage2") and (fp is None or fp >= -4):
-        return "BUY-READY", "good"
+        # A textbook trend in a loose base is where breakouts fail. Grade C/D
+        # keeps it on the watchlist instead of calling it an order.
+        if grade in ("A", "B"):
+            return "BUY-READY", "good"
+        return f"WATCH — Stage 2, but a grade {grade} base", "warn"
     if (p.get("tt_passed") or 0) >= 5 and (fp is None or fp >= -4):
         return "WATCH — 5/6 trend", "warn"
     return "WATCH ONLY — not Stage 2", "warn"

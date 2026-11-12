@@ -4,6 +4,31 @@ The problem this solves: launchd only fires while the Mac is awake and logged
 in. A shut lid at 09:00 means no plan; a sleeping Mac at 16:00 means no review.
 Everything below runs on a machine that never sleeps.
 
+## Option 0 — stay on this Mac for now (current setup)
+
+Nothing below is required yet. The Mac runs the same jobs through launchd, and
+two safety nets were added for the case you described:
+
+1. **Watchdog** (`tools/watchdog.py`) runs at :25 past 09–12 and 16–18. If the
+   morning plan or the closing review is missing — closed lid, crash, forced
+   sleep — it rebuilds it once, but only while that is still useful: a plan
+   before 13:00, a review before 19:00. Outside those windows it logs a gap
+   instead of publishing something stale as if it were live.
+2. **Cache check** in the same run. If the candle cache missed a session it
+   refreshes it, so the next report cannot quietly show last week's prices.
+
+Keep it awake for exact timing:
+
+```bash
+caffeinate -dimsu          # run in a terminal; Ctrl-C to stop
+```
+Plus System Settings → Lock Screen → **Prevent automatic sleeping when the
+display is off**. Closing the lid still sleeps the machine, watchdog or not —
+that is the one thing software cannot fix.
+
+Everything below is the move to a machine that never sleeps. It is ready when
+you are; no code changes needed.
+
 ## What you need
 
 | Item | Cost | Notes |

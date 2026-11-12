@@ -228,10 +228,13 @@ def msg_movers(d: dict) -> str:
 
 def msg_plan(p: dict) -> str:
     fp = p.get("from_pivot_pct")
+    grade = (p.get("base_grade") or "D").upper()
     if fp is not None and fp > 1.5:
         verdict = "🚫 MISSED — already above the chase limit"
+    elif p["stage2"] and (fp is None or fp >= -4) and grade in ("A", "B"):
+        verdict = "✅ BUY-READY — Stage 2, tight base, near pivot"
     elif p["stage2"] and (fp is None or fp >= -4):
-        verdict = "✅ BUY-READY — Stage 2, near pivot"
+        verdict = f"👀 WATCH — Stage 2 but the base is loose (grade {grade})"
     elif (p.get("tt_passed") or 0) >= 5:
         verdict = "👀 WATCH — 5/6 trend, wait for confirmation"
     else:
@@ -372,8 +375,10 @@ def build_messages(d: dict, docs: bool = True) -> list[str]:
         msgs.append("\n\n".join(x for x in (sectors, movers) if x))
 
     plans = d.get("plans") or []
-    ready = [p for p in plans if p.get("stage2") and
-             (p.get("from_pivot_pct") is None or p["from_pivot_pct"] <= 1.5)]
+    ready = [p for p in plans
+             if p.get("stage2")
+             and (p.get("base_grade") or "D").upper() in ("A", "B")
+             and (p.get("from_pivot_pct") is None or p["from_pivot_pct"] <= 1.5)]
     if plans and not ready:
         msgs.append("⚠️ <b>No A-grade setup today.</b>\n"
                     "<i>None of the candidates below clears every Stage-2 check. "
