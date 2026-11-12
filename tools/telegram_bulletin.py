@@ -401,10 +401,36 @@ def _calls_status(s: str) -> str:
             "filled": "open"}.get(s, s)
 
 
+def _safe(fn, *args, **kw):
+    """One broken section must not cost the reader the whole report."""
+    try:
+        return fn(*args, **kw)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] section {getattr(fn, '__name__', '?')} failed: {exc}",
+              file=sys.stderr)
+        return ""
+
+
+def _plan_fallback(p: dict) -> str:
+    """The levels are not optional. If the pretty card breaks, send these."""
+    out = [f"🎯 <b>{esc(p.get('symbol'))}</b>",
+           f"<b>Buy above</b>  {n(p.get('trigger'))}",
+           f"<i>limit {n(p.get('limit'))} — never pay more</i>",
+           f"<b>Stop</b>  {n(p.get('stop'))}"]
+    for i, t in enumerate((p.get("targets") or [])[:2], 1):
+        out.append(f"<b>Target {i}</b>  {n(t.get('price'))}  ({t.get('r')}R)")
+    if p.get("qty"):
+        out.append(f"<i>{p['qty']} shares · {money(p.get('position_value'))}</i>")
+    for b in (p.get("blockers") or []):
+        out.append(f"🚫 <b>{esc('; '.join(b))}</b> — watch only")
+    out += ["", "<i>Educational analysis only — not SEBI-registered advice.</i>"]
+    return "\n".join(out)
+
+
 def build_messages(d: dict, docs: bool = True) -> list[str]:
-    msgs = [msg_overview(d)]
-    sectors = msg_sectors(d)
-    movers = msg_movers(d)
+    msgs = [_safe(msg_overview, d)]
+    sectors = _safe(msg_sectors, d)
+    movers = _safe(msg_movers, d)
     if sectors or movers:
         msgs.append("\n\n".join(x for x in (sectors, movers) if x))
 
@@ -423,16 +449,16 @@ def build_messages(d: dict, docs: bool = True) -> list[str]:
                     "Risk 1–2% per trade, stop first.</i>")
 
     for p in plans[:3]:
-        msgs.append(msg_plan(p))
+        msgs.append(_safe(msg_plan, p) or _plan_fallback(p))
 
-    deep_msg = msg_deep(d)
+    deep_msg = _safe(msg_deep, d)
     if deep_msg:
         msgs.append(deep_msg)
 
     # Accountability only on the morning plan and the closing wrap; an hourly
     # bulletin repeating the same scorecard is noise.
     if d.get("mode") in ("daily", "eod"):
-        calls_msg = msg_calls(d)
+        calls_msg = _safe(msg_calls, d)
         if calls_msg:
             msgs.append(calls_msg)
 
@@ -441,8 +467,10 @@ def build_messages(d: dict, docs: bool = True) -> list[str]:
                     "<i>Forcing a trade in a thin tape is how accounts die. "
                     "Wait for a pivot with volume.</i>")
 
-    msgs.append(msg_headlines(d))
-    return msgs
+    headlines = _safe(msg_headlines, d)
+    if headlines:
+        msgs.append(headlines)
+    return [m for m in msgs if m]
 
 
 def main() -> int:

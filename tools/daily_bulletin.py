@@ -87,9 +87,12 @@ def main() -> int:
     html_path = REPORTS / f"{stem}.html"
     json_path = REPORTS / f"{stem}.json"
 
-    md_path.write_text(bulletin_render.render_md(data), encoding="utf-8")
+    # The safe variants fall back to a complete-but-plain report rather than
+    # letting one bad field cost the reader the whole plan. A crash here means
+    # nothing is sent at all, and the 09:00 plan is the whole point of the day.
+    md_path.write_text(bulletin_render.render_md_safe(data), encoding="utf-8")
     html_path.write_text(
-        bulletin_render.render_html(data, f"{args.mode} {stamp}"), encoding="utf-8"
+        bulletin_render.render_html_safe(data, f"{args.mode} {stamp}"), encoding="utf-8"
     )
     json_path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
 

@@ -8,6 +8,7 @@ so rows stack into readable cards on a phone.
 from __future__ import annotations
 
 import html as _h
+import sys
 from datetime import date
 
 QUAD_CLASS = {
@@ -809,6 +810,85 @@ def render_md(d: dict) -> str:
     a("---")
     a("_Auto-generated from the trading-skills calculators. Educational only — not investment advice._")
     return "\n".join(L)
+
+
+# ---------------------------------------------------------------------------
+# safety net
+# ---------------------------------------------------------------------------
+def _fallback_md(d: dict, exc: Exception) -> str:
+    """The plan must exist even when a section of the report cannot be built.
+
+    A None slipping into an f-string cost the 09:00 plan on 12 Nov: the whole
+    markdown render raised, the job died, and nothing was sent. The levels are
+    the part that cannot be optional, so the fallback is built straight from
+    the structured data and carries entry, stop and both targets.
+    """
+    idx = d.get("index") or {}
+    reg = d.get("regime") or {}
+    mode = (d.get("mode") or "intraday").title()
+    L = [f"# {mode} — India — {str(d.get('generated_at') or '')[:16].replace('T', ' ')}",
+         "",
+         "> Educational analysis only. Not SEBI-registered advice.",
+         "",
+         f"> ⚠️ One section of the full report failed to render ({_h.escape(str(exc))}). "
+         "The tradeable levels below are complete and come straight from the data.",
+         "",
+         f"**Regime:** {reg.get('label') or 'n/a'} — risk "
+         f"{reg.get('risk_score') if reg.get('risk_score') is not None else 'n/a'}/100, "
+         f"exposure ceiling {reg.get('exposure_pct') if reg.get('exposure_pct') is not None else 'n/a'}%.",
+         f"**Nifty 50:** {_n(idx.get('close'))} ({_pct(idx.get('change_pct'))})",
+         ""]
+    for p in (d.get("plans") or []):
+        L.append(f"## {p.get('symbol')} — {p.get('name') or ''}")
+        L.append(f"- Buy above **{_n(p.get('trigger'))}** · limit {_n(p.get('limit'))} — never pay more")
+        L.append(f"- Stop **{_n(p.get('stop'))}** ({p.get('stop_method') or 'structure'})")
+        for i, t in enumerate((p.get("targets") or [])[:2], 1):
+            L.append(f"- T{i} **{_n(t.get('price'))}** ({t.get('r')}R)")
+        if p.get("qty"):
+            L.append(f"- Size: {p['qty']} shares · {_n(p.get('position_value'), 0)} "
+                     f"· risk {_n(p.get('risk_if_stopped'), 0)}")
+        for b in (p.get("blockers") or []):
+            L.append(f"- 🚫 {b}")
+        L.append("")
+    L += ["---",
+          "_Full report partially rendered. Educational only — not investment advice._"]
+    return "\n".join(L)
+
+
+def render_md_safe(d: dict) -> str:
+    """render_md, but a broken section costs a section and not the report."""
+    try:
+        return render_md(d)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] markdown render failed: {exc}", file=sys.stderr)
+        try:
+            return _fallback_md(d, exc)
+        except Exception as exc2:  # noqa: BLE001
+            print(f"[warn] fallback render failed too: {exc2}", file=sys.stderr)
+            return ("# Report unavailable\n\n"
+                    "> Educational analysis only. Not SEBI-registered advice.\n\n"
+                    "The report could not be rendered. The machine's own log has the "
+                    "reason; no levels are being published rather than wrong ones.")
+
+
+def render_html_safe(d: dict, title: str) -> str:
+    """render_html with the same guarantee: the attachment is optional."""
+    try:
+        return render_html(d, title)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] html render failed: {exc}", file=sys.stderr)
+        try:
+            md = _fallback_md(d, exc)
+        except Exception:
+            md = "Report unavailable."
+        body = "<pre>" + _h.escape(md) + "</pre>"
+        return ("<!doctype html><html><head><meta charset='utf-8'>"
+                f"<meta name='viewport' content='width=device-width,initial-scale=1'>"
+                f"<title>{_h.escape(str(title))}</title>"
+                "<style>body{background:#0b0f14;color:#e6edf5;font-family:-apple-system,"
+                "Segoe UI,Roboto,sans-serif;padding:16px;line-height:1.5}"
+                "pre{white-space:pre-wrap;word-break:break-word}</style></head>"
+                f"<body>{body}</body></html>")
 
 
 def verdict(reg: dict) -> str:

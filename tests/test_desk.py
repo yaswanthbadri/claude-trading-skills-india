@@ -607,5 +607,80 @@ class TestDeliveryRouting(unittest.TestCase):
                 orig_aud, orig_msg, orig_sleep)
 
 
+class TestReportSurvivesABrokenSection(unittest.TestCase):
+    """A None in an f-string once cost the whole 09:00 plan.
+
+    The renderer died, the job died with it, and nothing was sent. The levels
+    are the part that cannot be optional, so the fallback carries them.
+    """
+
+    def _data(self):
+        return {
+            "mode": "daily", "generated_at": "2026-11-13T09:00:00",
+            "index": {"close": 24500.0, "change_pct": 0.4},
+            "regime": {"label": "Constructive", "risk_score": 40,
+                       "exposure_pct": 80},
+            "plans": [{
+                "symbol": "CENTUM", "name": "Centum",
+                "trigger": 4238.5, "limit": 4356.9, "stop": 4008.4,
+                "stop_method": "structure", "qty": 13,
+                "position_value": 56640.0, "risk_if_stopped": 2991.0,
+                "targets": [{"price": 5054.0, "r": 2.0},
+                            {"price": 5402.5, "r": 3.0}],
+            }],
+        }
+
+    def test_the_fallback_carries_entry_stop_and_both_targets(self):
+        import bulletin_render as br
+        out = br._fallback_md(self._data(), TypeError("unsupported format string"))
+        for must in ("CENTUM", "4,238.50", "4,356.90", "4,008.40",
+                     "5,054.00", "5,402.50", "SEBI-registered"):
+            self.assertIn(must, out)
+
+    def test_render_md_safe_returns_a_report_when_the_renderer_breaks(self):
+        import bulletin_render as br
+        orig = br.render_md
+        br.render_md = lambda d: (_ for _ in ()).throw(TypeError("boom"))
+        try:
+            out = br.render_md_safe(self._data())
+        finally:
+            br.render_md = orig
+        self.assertIn("CENTUM", out)
+        self.assertIn("4,008.40", out)
+
+    def test_a_good_render_is_untouched(self):
+        import bulletin_render as br
+        # The real renderer must still work on a real bulletin.
+        import json
+        from pathlib import Path
+        files = sorted((Path(__file__).resolve().parents[1] / "reports")
+                       .glob("bulletin_daily_*.json"))
+        if not files:
+            self.skipTest("no bulletin on disk")
+        d = json.loads(files[-1].read_text())
+        self.assertIn("Educational", br.render_md_safe(d)[:400])
+
+    def test_one_broken_card_does_not_cost_the_others(self):
+        import telegram_bulletin as tb
+        orig = tb.msg_plan
+        tb.msg_plan = lambda p: (_ for _ in ()).throw(TypeError("boom"))
+        try:
+            msgs = tb.build_messages(self._data())
+        finally:
+            tb.msg_plan = orig
+        self.assertTrue(msgs)
+        joined = "\n".join(msgs)
+        self.assertIn("CENTUM", joined)
+        self.assertIn("Buy above", joined)
+        self.assertIn("4,008.40", joined)
+
+    def test_the_plan_fallback_has_the_levels(self):
+        import telegram_bulletin as tb
+        card = tb._plan_fallback(self._data()["plans"][0])
+        self.assertIn("4,238.50", card)
+        self.assertIn("4,008.40", card)
+        self.assertIn("5,402.50", card)
+
+
 if __name__ == "__main__":
     unittest.main()
