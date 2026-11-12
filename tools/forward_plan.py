@@ -327,9 +327,14 @@ def _pullback_plan(rows: list[dict], detail: dict, capital: float,
         return {}
     plan = _plan("pullback", entry, stop, capital, risk_pct,
                  "Buy a pullback into the 20-day average",
-                 note=(f"No chase entry. If it comes back to {entry:.0f} and holds, "
-                       f"buy there with the stop under {stop:.0f}. If it never comes "
-                       "back, you did not have a trade — which is the point."),
+                 note=("No chase entry. If it comes back here and holds, buy "
+                       "there. If it never comes back, you did not have a trade "
+                       "— which is the point."),
                  extra={"entry_zone": [round(entry * 0.995, 2),
                                        round(entry * 1.01, 2)]})
+    if plan:
+        plan["note"] = (f"No chase entry. If it comes back to {entry:.0f} and "
+                        f"holds, buy there with the stop at {plan['stop']:.0f}. "
+                        "If it never comes back, you did not have a trade — "
+                        "which is the point.")
     return plan
