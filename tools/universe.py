@@ -35,7 +35,11 @@ UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
 
 # Symbols that are not ordinary equity or break yfinance tickers.
 SKIP_SERIES = {"BE", "BZ", "EQ_SME", "ST", "SM", "IV"}
-BAD_CHARS = set("/ .&")
+# '&' used to be excluded here, which quietly dropped M&M (a Nifty 50 name),
+# M&MFIN, ARE&M, GMRP&UI and others from a "full universe" scan. Both yfinance
+# and this filesystem handle it, so only characters that break a path or a URL
+# are rejected now.
+BAD_CHARS = set("/ .")
 
 
 def fetch_nse() -> list[dict]:

@@ -1,22 +1,31 @@
 #!/usr/bin/env python3
-"""Ad-hoc market alert monitor for India (NSE/BSE).
+"""Stock-event alerts: only when something moves a *particular* stock.
 
-Runs every few minutes. Two independent scanners:
+What this replaced, and why
+    The first version pushed index moves, VIX levels and generic macro
+    headlines. That is noise: "Nifty +1%" tells you nothing you can trade.
+    This version asks one question of every headline:
 
-  NEWS  (24x7)   multi-feed RSS scan, keyword-tiered, deduped by headline.
-                 CRITICAL items are sent immediately with no cooldown.
-  PRICE (market  Nifty threshold crossings, India VIX regime changes, and
-         hours)  single-stock shocks on a liquid universe.
+        which single NSE stock does this move, and by how much is it moving?
 
-Every alert is its own Telegram message so it lands instantly, with a plain
-English "why it matters" note. No fixed-width tables, no spam: per-key
-cooldowns and a global rate limit.
+    If it cannot name the stock, it does not send anything.
+
+Two scanners
+    EVENTS  A headline is matched to one listed company, the event type must be
+            one that reprices a stock (results, order win, regulatory action,
+            rating change, deal, fraud, guidance), and the card carries the
+            live reaction: last price, % move, volume vs its own average.
+    SHOCKS  A liquid stock moves 6%+ on 1.8x+ its normal volume with no
+            headline needed. The tape is the news.
+
+Never sent: index levels, VIX milestones, "stocks to watch", market wraps,
+policy commentary that names no company. Educational only, not advice.
 
 Usage:
     python3 tools/alert_monitor.py               # normal run (scheduler)
     python3 tools/alert_monitor.py --news-only
     python3 tools/alert_monitor.py --prices-only
-    python3 tools/alert_monitor.py --dry-run     # print, never send
+    python3 tools/alert_monitor.py --dry-run
     python3 tools/alert_monitor.py --force       # send a test alert
 """
 from __future__ import annotations
@@ -36,6 +45,10 @@ import market_calendar as cal
 
 REPO = Path(__file__).resolve().parents[1]
 STATE = REPO / "logs" / "alert_state.json"
+# Every alert ever sent, with the headline that caused it. Without this, a
+# false positive is invisible after the fact: the state file only remembers
+# which headlines were seen, not what was actually delivered.
+AUDIT = REPO / "logs" / "alerts.jsonl"
 PYTHON = sys.executable
 
 # ---------------------------------------------------------------------------
@@ -44,11 +57,13 @@ PYTHON = sys.executable
 FEEDS = [
     ("ET Stocks", "https://economictimes.indiatimes.com/markets/stocks/rssfeeds/2146842.cms"),
     ("ET Markets", "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms"),
-    ("ET Economy", "https://economictimes.indiatimes.com/economy/rssfeeds/1373380680.cms"),
+    ("ET Industry", "https://economictimes.indiatimes.com/industry/rssfeeds/13352306.cms"),
     ("Business Standard", "https://www.business-standard.com/rss/markets-106.rss"),
     ("Mint Markets", "https://www.livemint.com/rss/markets"),
+    ("Moneycontrol", "https://www.moneycontrol.com/rss/business.xml"),
 ]
 
+# Headline shapes that never carry a tradable stock event.
 NOISE = (
     "share price highlights",
     "stock price history",
@@ -60,103 +75,194 @@ NOISE = (
     "rsi trending",
     "rose above their 200 dma",
     "candlestick",
+    "technical analysis",
+    "mutual fund",
+    "sip",
+    "gold rate",
+    "rupee",
 )
 
-# (regex, short label, why-it-matters)
-CRITICAL = [
-    (r"circuit breaker|trading halt|markets? (?:shut|halted)|suspend(?:ed|sion) of trading",
-     "trading halt",
-     "Exchange-level halt. Liquidity disappears and stop orders can fill far worse than planned."),
-    (r"\bmarket crash\b|\bsensex crashes\b|\bnifty crashes\b|\bbloodbath\b|"
-     r"worst (?:day|fall|crash) (?:for|in) (?:the )?(?:sensex|nifty|indian stocks|dalal street)",
-     "market crash",
-     "Broad risk-off. Correlations go to 1 — diversify by cash, not by stock."),
-    (r"emergency (?:rate|policy)|off-cycle (?:rate|policy)|unscheduled (?:mpc|policy)",
-     "emergency RBI action",
-     "Off-cycle policy moves reprice banks, NBFCs and rate-sensitives instantly."),
-    (r"\bdefault(?:s|ed)?\b|insolvency|bank run|collapse of|\bNPA fraud",
-     "credit event",
-     "Credit stress hits lenders and the whole funding chain, not just the company named."),
-    (r"declares? war|war with|military strike|border (?:strike|escalation)|attack on",
-     "geopolitical shock",
-     "Geopolitical shocks hit crude first, then the rupee, then the whole index."),
-    (r"SEBI (?:ban|bars|restrains)|F&O ban|trade-for-trade|GSM|ASM stage",
-     "regulatory action",
-     "Surveillance or bans cut liquidity and can force position exits."),
-    (r"\bCBI\b|\bED\b raid|income tax raid|enforcement directorate|\bSFIO\b",
-     "enforcement action",
-     "Raids on promoters usually mean governance risk and a sharp de-rating."),
-]
-
-HIGH = [
-    (r"\bRBI\b|repo rate|CRR|SLR|monetary policy|\bMPC\b",
-     "RBI / policy",
-     "Rate news moves banks, NBFCs, autos and realty first."),
-    (r"\bFed\b|federal reserve|fomc|rate (?:cut|hike)|treasury yield",
-     "US Fed / rates",
-     "Global risk appetite. IT and metals react most; a strong dollar pressures FII flows."),
-    (r"crude|brent|opec|oil price",
-     "crude oil",
-     "Oil hurts importers (paints, airlines, tyres) and helps upstream (ONGC, Oil India)."),
-    (r"tariff|trade deal|export ban|import duty|anti-dumping",
-     "trade policy",
-     "Tariffs reprice exporters and import-heavy sectors within a session."),
-    (r"inflation|\bCPI\b|\bWPI\b|GDP|IIP|fiscal deficit|current account",
-     "macro data",
-     "Macro prints move the index and the rate-sensitive basket together."),
-    (r"\bFII\b|\bDII\b|block deal|bulk deal|stake sale|promoter (?:sell|buy)",
-     "flows / deals",
-     "Supply-demand shift in a single stock; block deals often print at a discount."),
-    (r"\bQ[1-4]\b results|earnings|profit (?:jumps|falls|surges|plunges)|revenue (?:up|down)|guidance cut",
+# Only events that reprice one company. Pattern, label, plain-English reason.
+EVENTS = [
+    (r"\bq[1-4]\b.*(?:results|profit|revenue|earnings)|(?:net profit|revenue|ebitda|margin)"
+     r"\s*(?:jumps?|falls?|rises?|slumps?|surges?|plunges?|beats?|misses?)|"
+     r"results (?:today|tomorrow)|profit warning",
      "results",
-     "Results gaps of 5–15% jump any stop. Check whether your position reports today."),
-    (r"merger|acquisition|open offer|delisting|demerger|buyback",
-     "corporate action",
-     "Corporate actions reprice the stock and sometimes its peers in the same sector."),
-    (r"\bIPO\b|listing (?:gain|day)|anchor (?:investor|book)|grey market",
-     "primary market",
-     "IPO news pulls liquidity and attention away from listed small caps."),
-    (r"downgrade|upgrade|target price|brokerage (?:cut|raise)",
+     "Results gaps of 5-15% jump any stop. If you hold it, the stop is now the open, "
+     "not yesterday's close."),
+    (r"(?:wins?|bags?|secures?|receives?|clinches?|awarded|awards?|sanctioned)"
+     r"\s+[^;\n]{0,45}?(?:order|contract|deal|mandate|loa)\b|"
+     r"(?:order|contract) worth|letter of award",
+     "order win",
+     "A large order changes forward earnings. Check the size against annual revenue, "
+     "not against the share price."),
+    (r"\bsebi\b.*(?:ban|bar|restrain|penalt|fine)|f&o ban|trade[- ]for[- ]trade|"
+     r"\bgsm\b|\basm\b|surveillance measure|suspended from trading",
+     "regulatory action",
+     "Surveillance cuts liquidity and can force exits. Positions get harder to leave, "
+     "not cheaper to hold."),
+    (r"rating (?:cut|downgrade|upgrade)|downgrades? .* to (?:sell|reduce)|"
+     r"upgrades? .* to (?:buy|add)|target price (?:cut|raised|hiked|slashed)",
      "analyst action",
-     "Rating changes move institutional flows over the following sessions."),
+     "Ratings move institutional flows over the next few sessions, not minutes. "
+     "Useful for direction, useless for timing."),
+    (r"block deal|bulk deal|stake (?:sale|buy|purchase)|promoter (?:sells?|buys?|pledges?)|"
+     r"open offer|delisting|merger|acquisition|demerger|stake sale|qip|"
+     r"fund[- ]?rais\w*|raises? (?:rs\.?|₹)?\s?[\d,]+ crore",
+     "deal / ownership",
+     "Supply and control change hands. Block deals often print at a discount to the "
+     "prevailing price, which caps the stock that day."),
+    (r"fraud|raid|probe|investigation|default|insolvency|\bnclt\b|recall|"
+     r"accounting irregularit|whistleblower",
+     "risk event",
+     "Governance and solvency events de-rate a stock for months, not days. "
+     "This is an exit signal, not a dip."),
+    (r"(?:cuts?|raises?|lifts?|lowers?|upgrades?|downgrades?|trims?)\s+"
+     r"(?:its\s+)?(?:fy\d{2}\s+)?(?:guidance|outlook)|guidance (?:cut|raised|lifted)|"
+     r"capex plan|new plant|capacity expansion|commission(?:s|ed) .* plant|"
+     r"joint venture|\bjv\b",
+     "capex / guidance",
+     "Forward-looking capex and guidance move the multiple. Verify against cash flow, "
+     "not the press release."),
+    (r"(?:reports?|posts?|registers?|logs?)\s+[^;\n]{0,30}?\b(?:sales|dispatches|"
+     r"production|volumes)\b",
+     "monthly numbers",
+     "Volume disclosures are the monthly heartbeat of autos and FMCG. A miss here "
+     "usually moves the stock more than the quarterly print did."),
+    (r"buyback|bonus issue|stock split|rights issue|dividend",
+     "capital action",
+     "Mechanical price change or cash return. Adjust your levels before the ex-date "
+     "or your stop will trigger on nothing."),
 ]
 
-WHY_FALLBACK = "Material headline for Indian equities — check whether you hold the name."
+# Kept deliberately tiny: a trading halt or a market-wide crash is the only
+# non-stock-specific event worth waking someone for.
+SYSTEMIC = [
+    (r"circuit breaker|trading halt|markets? (?:shut|halted)|suspension of trading",
+     "exchange halt",
+     "Trading stops. Stops and targets cannot fill until it reopens, and gaps do the "
+     "pricing when it does."),
+    (r"\bmarket crash\b|\bsensex crashes\b|\bnifty crashes\b|worst (?:day|fall|crash)",
+     "market-wide fall",
+     "Everything correlates in a crash. The only real diversifier today is cash."),
+]
 
-# An alert must be about India. Global-only items (US futures, European shares,
-# dollar/sterling moves) are noisy and mostly irrelevant to an NSE trader.
-INDIA_SIGNALS = re.compile(
-    r"\bnifty\b|\bsensex\b|\bbse\b|\bnse\b|\brbi\b|\bsebi\b|\brupee\b|\bindia\b|"
-    r"\bindian\b|\bcrore\b|\blakh\b|dalal street|\bmcap\b|gift nifty|\bfii\b|\bdii\b|"
-    r"\bipo\b|\bqip\b|\bmutual fund\b|\bsip\b|\bdemat\b",
-    re.I,
-)
+WHY_FALLBACK = "Material event for this company — check whether you hold it."
 
-COMPANY_HINTS = re.compile(
-    r"reliance|hdfc|icici|tcs|infosys|infy|sbi|state bank|bharti|airtel|itc|"
-    r"larsen|ltim|kotak|axis bank|bajaj|maruti|mahindra|sun pharma|titan|"
-    r"ultratech|asian paints|hindustan unilever|nestle|tata|adani|jsw|hindalco|"
-    r"dr reddy|cipla|divis|tech mahindra|hcl|wipro|power grid|ntpc|ongc|"
-    r"coal india|bpcl|iocl|indian oil|bel|bharat electronics|hal|irctc|zomato|"
-    r"swiggy|paytm|nykaa|pnb|bank of baroda|idfc|yes bank|vedanta|dlf|godrej|"
-    r"lupin|aurobindo|muthoot|cholamandalam|shriram|lic|gail|sail|nmdc|"
-    r"jubilant|page industries|polycab|havells|siemens|abb|bosch|cummins",
-    re.I,
-)
+# Event types that routinely appear without moving the stock. For these, the
+# tape has to agree: at least a 1% move or 1.5x volume. A rating note on a flat
+# stock is a newsletter, not an alert. Results, risk and regulatory events skip
+# the gate — they matter before the reaction shows up.
+REACTION_GATED = {"analyst action", "capital action", "monthly numbers",
+                  "capex / guidance"}
+MIN_REACTION_PCT = 1.0
+MIN_REACTION_VOL = 1.5
 
-# Liquid universe for single-stock shock alerts.
-ALERT_UNIVERSE = (
+# Names a headline uses that the registered company name does not contain.
+ALIASES = {
+    "hul": "HINDUNILVR", "hindustan unilever": "HINDUNILVR",
+    "l&t": "LT", "larsen": "LT", "larsen & toubro": "LT",
+    "m&m": "M&M", "mahindra & mahindra": "M&M",
+    "sbi": "SBIN", "state bank": "SBIN", "state bank of india": "SBIN",
+    "infy": "INFY", "tcs": "TCS", "wipro": "WIPRO", "hcl": "HCLTECH",
+    "techm": "TECHM", "ltim": "LTIM", "mindtree": "LTIM",
+    "bajaj finance": "BAJFINANCE", "bajaj finserv": "BAJAJFINSV",
+    "kotak": "KOTAKBANK", "axis": "AXISBANK", "icici": "ICICIBANK",
+    "hdfc bank": "HDFCBANK", "hdfc life": "HDFCLIFE", "hdfc amc": "HDFCAMC",
+    "airtel": "BHARTIARTL", "bharti airtel": "BHARTIARTL",
+    "maruti": "MARUTI", "maruti suzuki": "MARUTI",
+    "tata motors": "TATAMOTORS", "tata steel": "TATASTEEL",
+    "tata power": "TATAPOWER", "tata chemicals": "TATACHEM",
+    "tata consumer": "TATACONSUM", "tata elxsi": "TATAELXSI",
+    "titan": "TITAN", "asian paints": "ASIANPAINT",
+    "ultratech": "ULTRACEMCO", "nestle": "NESTLEIND",
+    "sun pharma": "SUNPHARMA", "dr reddy": "DRREDDY", "cipla": "CIPLA",
+    "divis": "DIVISLAB", "apollo hospitals": "APOLLOHOSP",
+    "power grid": "POWERGRID", "ntpc": "NTPC", "ongc": "ONGC",
+    "coal india": "COALINDIA", "bpcl": "BPCL", "iocl": "IOC",
+    "indian oil": "IOC", "gail": "GAIL", "sail": "SAIL",
+    "vedanta": "VEDANTA", "adani enterprises": "ADANIENT",
+    "adani ports": "ADANIPORTS", "adani power": "ADANIPOWER",
+    "adani green": "ADANIGREEN", "adani total gas": "ATGL",
+    "jsw steel": "JSWSTEEL", "hindalco": "HINDALCO",
+    "dlf": "DLF", "godrej properties": "GODREJPROP",
+    "zomato": "ETERNAL", "eternal": "ETERNAL", "swiggy": "SWIGGY",
+    "paytm": "PAYTM", "nykaa": "NYKAA", "dmart": "DMART",
+    "avenue supermarts": "DMART", "irctc": "IRCTC",
+    "bel": "BEL", "bharat electronics": "BEL", "hal": "HAL",
+    "hindustan aeronautics": "HAL", "lic": "LICI",
+    "pnb": "PNB", "punjab national bank": "PNB",
+    "bank of baroda": "BANKBARODA", "canara bank": "CANBK",
+    "yes bank": "YESBANK", "idfc first": "IDFCFIRSTB",
+    "muthoot": "MUTHOOTFIN", "cholamandalam": "CHOLAFIN",
+    "shriram finance": "SHRIRAMFIN", "bajaj auto": "BAJAJ-AUTO",
+    "eicher": "EICHERMOT", "royal enfield": "EICHERMOT",
+    "hero motocorp": "HEROMOTOCO", "tvs motor": "TVSMOTOR",
+    "bosch": "BOSCHLTD", "siemens": "SIEMENS", "abb": "ABB",
+    "cummins": "CUMMINSIND", "polycab": "POLYCAB", "havells": "HAVELLS",
+    "page industries": "PAGEIND", "jubilant": "JUBLFOOD",
+    "lupin": "LUPIN", "aurobindo": "AUROPHARMA", "alkem": "ALKEM",
+    "torrent pharma": "TORNTPHARM", "cipla": "CIPLA",
+    "indigo": "INDIGO", "interglobe": "INDIGO",
+    "spicejet": "SPICEJET", "air india": "AIRINDIA",
+    "irfc": "IRFC", "rvnl": "RVNL", "ircon": "IRCON",
+    "bhel": "BHEL", "beml": "BEML", "mazagon": "MAZDOCK",
+    "cochin shipyard": "COCHINSHIP", "garden reach": "GRSE",
+    "hudco": "HUDCO", "rec": "RECLTD", "power finance": "PFC",
+    "suzlon": "SUZLON", "inox wind": "INOXWIND",
+    "vodafone idea": "IDEA",
+    "yes bank": "YESBANK", "federal bank": "FEDERALBNK",
+    "indusind": "INDUSINDBK", "bandhan": "BANDHANBNK",
+    "au small finance": "AUBANK", "idbi": "IDBI",
+    "central bank": "CENTRALBK", "union bank": "UNIONBANK",
+    "iob": "IOB", "bank of maharashtra": "MAHABANK",
+}
+
+# Legal-form words that add nothing to a company's identity.
+STRIP_WORDS = {
+    "limited", "ltd", "ltd.", "inc", "incorporated", "corp", "corporation",
+    "company", "co", "co.", "pvt", "private", "plc", "the",
+}
+# Brands too generic to identify one company on their own.
+GENERIC = {"tata", "adani", "bajaj", "godrej", "mahindra", "jindal", "reliance",
+           "hinduja", "essar", "jaypee", "steel", "power", "finance", "capital",
+           "industries", "enterprises", "holdings", "group", "india", "bank"}
+
+SHOCK_PCT = 6.0
+SHOCK_VOLUME_X = 1.8
+
+
+def shock_symbols() -> list[str]:
+    """The watch list, minus anything NSE no longer trades under that symbol."""
+    wanted = [s for s in SHOCK_UNIVERSE.split(",") if s]
+    try:
+        import universe
+        live = {r["symbol"].upper() for r in universe.load() if r.get("symbol")}
+    except Exception:
+        return wanted
+    keep = [s for s in wanted if s in live]
+    dropped = [s for s in wanted if s not in live]
+    if dropped:
+        print(f"[warn] shock list: unknown NSE symbols skipped: {', '.join(dropped)}",
+              file=sys.stderr)
+    return keep or wanted
+
+# Liquid names whose quotes are reliable every five minutes. A 6% move in an
+# illiquid microcap is usually a data artefact, not news.
+SHOCK_UNIVERSE = (
     "RELIANCE,HDFCBANK,ICICIBANK,TCS,INFY,SBIN,BHARTIARTL,ITC,LT,KOTAKBANK,"
     "AXISBANK,BAJFINANCE,MARUTI,M&M,SUNPHARMA,TITAN,ULTRACEMCO,ASIANPAINT,"
     "HINDUNILVR,NESTLEIND,TMPV,TATASTEEL,JSWSTEEL,HINDALCO,ADANIENT,"
     "ADANIPORTS,BAJAJFINSV,BAJAJ-AUTO,HEROMOTOCO,EICHERMOT,DRREDDY,CIPLA,"
     "DIVISLAB,TECHM,HCLTECH,WIPRO,POWERGRID,NTPC,ONGC,COALINDIA,BPCL,IOC,"
-    "BEL,HAL,IRCTC,ETERNAL,DMART,PNB,BANKBARODA,IDFCFIRSTB,DLF"
+    "BEL,HAL,IRCTC,ETERNAL,DMART,PNB,BANKBARODA,IDFCFIRSTB,DLF,GAIL,SAIL,"
+    "VEDL,ADANIPOWER,ADANIGREEN,ATGL,JSWENERGY,TATAPOWER,TMCV,TMPV,"
+    "TATACONSUM,TATACHEM,TVSMOTOR,INDIGO,HAVELLS,POLYCAB,SIEMENS,ABB,"
+    "CUMMINSIND,BOSCHLTD,LUPIN,AUROPHARMA,ALKEM,TORNTPHARM,APOLLOHOSP,"
+    "MUTHOOTFIN,CHOLAFIN,SHRIRAMFIN,CANBK,UNIONBANK,FEDERALBNK,INDUSINDBK,"
+    "AUBANK,BANDHANBNK,LICI,RECLTD,PFC,IRFC,RVNL,BHEL,MAZDOCK,COCHINSHIP,"
+    "SUZLON,INOXWIND,PAYTM,NYKAA,IDEA"
 )
-
-STOCK_MOVE_PCT = 4.5
-NIFTY_STEP_PCT = 1.0
-VIX_LEVELS = (18, 20, 25, 30)
 
 
 # ---------------------------------------------------------------------------
@@ -181,19 +287,31 @@ def load_state() -> dict:
             return json.loads(STATE.read_text())
         except Exception:
             pass
-    return {"seen_news": {}, "last_by_key": {}, "nifty_bucket": 0, "vix_bucket": 0,
-            "sent_log": []}
+    return {"seen_news": {}, "last_by_key": {}, "sent_log": []}
 
 
 def save_state(s: dict) -> None:
     STATE.parent.mkdir(parents=True, exist_ok=True)
-    # keep the state bounded
     seen = s.get("seen_news", {})
-    if len(seen) > 2000:
-        keep = sorted(seen.items(), key=lambda kv: kv[1])[-2000:]
+    if len(seen) > 3000:
+        keep = sorted(seen.items(), key=lambda kv: kv[1])[-3000:]
         s["seen_news"] = dict(keep)
-    s["sent_log"] = (s.get("sent_log") or [])[-200:]
+    s["sent_log"] = (s.get("sent_log") or [])[-300:]
     STATE.write_text(json.dumps(s, indent=2, default=str))
+
+
+def _audit(symbol: str | None, event: str, title: str, source: str,
+           link: str) -> None:
+    try:
+        AUDIT.parent.mkdir(parents=True, exist_ok=True)
+        with AUDIT.open("a") as f:
+            f.write(json.dumps({
+                "ts": datetime.now().isoformat(timespec="seconds"),
+                "symbol": symbol, "event": event, "title": title,
+                "source": source, "link": link,
+            }, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 
 
 def esc(s: str) -> str:
@@ -206,7 +324,6 @@ def _hash(title: str) -> str:
 
 
 def _cooled(state: dict, key: str, minutes: int) -> bool:
-    """True when this key is still inside its cooldown."""
     last = state.get("last_by_key", {}).get(key)
     if not last:
         return False
@@ -220,7 +337,7 @@ def _mark(state: dict, key: str) -> None:
     state.setdefault("last_by_key", {})[key] = datetime.now().isoformat(timespec="seconds")
 
 
-def _global_rate_ok(state: dict, max_per_30min: int = 8) -> bool:
+def _global_rate_ok(state: dict, max_per_30min: int = 4) -> bool:
     cutoff = datetime.now() - timedelta(minutes=30)
     recent = 0
     for ts in (state.get("sent_log") or [])[-60:]:
@@ -253,7 +370,177 @@ def send_telegram(text: str, dry: bool = False) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# news scanner
+# headline -> one listed company
+# ---------------------------------------------------------------------------
+_NAME_INDEX: list[tuple[str, str, bool]] | None = None
+
+# Words that are a company's first name but also ordinary headline vocabulary.
+# "Mumbai metro" is not Metro Brands, and "West Bengal" is not West Coast Paper.
+# A full company name or an alias still resolves these; only the lazy
+# first-word shortcut is withheld.
+WEAK_BLOCK = {
+    "west", "east", "north", "south", "central", "national", "indian", "india",
+    "global", "united", "general", "standard", "metro", "new", "first", "prime",
+    "universal", "oriental", "dynamic", "future", "advance", "super", "sun",
+    "star", "shree", "shri", "sri", "jai", "om", "sanghvi", "paras", "vibrant",
+    "perfect", "popular", "royal", "modern", "smart", "true", "green", "blue",
+    # states, regions and metros
+    "bengal", "assam", "punjab", "gujarat", "kerala", "karnataka", "tamil",
+    "maharashtra", "rajasthan", "madhya", "uttar", "andhra", "telangana",
+    "bihar", "odisha", "orissa", "haryana", "goa", "delhi", "mumbai", "chennai",
+    "kolkata", "hyderabad", "pune", "nagpur", "surat", "indore", "jaipur",
+}
+
+# Qualifiers that turn the next word into a place, not a brand: 'West Bengal',
+# 'New Delhi', 'South Mumbai'.
+GEO_QUALIFIER = r"(?:west|east|north|south|new|old|greater|upper|lower|central)"
+
+
+def _name_index() -> list[tuple[str, str, bool]]:
+    """(phrase, symbol, strong) — strongest matches first.
+
+    strong=True  an alias or a full registered name: match anywhere, any case.
+    strong=False a first name only ('Metro' from 'Metro Brands'): matched only
+                 when it is capitalised, because 'metro' in a headline is far
+                 more often the Mumbai metro than the shoe retailer.
+
+    Order matters twice over: strong entries all beat weak ones, and within
+    each group the longest phrase wins, so 'Tata Steel' never loses to 'Tata'.
+    """
+    global _NAME_INDEX
+    if _NAME_INDEX is not None:
+        return _NAME_INDEX
+
+    strong: dict[str, str] = {}
+    weak: dict[str, str] = {}
+
+    def add(key: str, sym: str, is_strong: bool) -> None:
+        k = re.sub(r"\s+", " ", key.lower()).strip(" .,")
+        if len(k) < 3 or k in GENERIC:
+            return
+        if not re.search(r"[a-z]", k):
+            return
+        (strong if is_strong else weak).setdefault(k, sym)
+
+    for alias, sym in ALIASES.items():
+        add(alias, sym, True)
+
+    try:
+        import universe
+        for row in universe.load():
+            sym = (row.get("symbol") or "").upper()
+            name = (row.get("name") or "")
+            if not sym or not name:
+                continue
+            words = [w for w in re.split(r"[\s]+", name)
+                     if w.lower().strip(".,") not in STRIP_WORDS]
+            add(" ".join(words), sym, True)
+            # 'Reliance Industries' -> 'Reliance' is useful; 'Adani' alone is not.
+            first = words[0].lower().strip(".,") if words else ""
+            if len(words) > 1 and first not in GENERIC and first not in WEAK_BLOCK:
+                add(words[0], sym, False)
+            # A two-word pair is far safer than one word and rescues names whose
+            # first word is blocked: 'Sun TV Network' still answers to 'Sun TV'.
+            if len(words) > 2:
+                two = " ".join(words[:2]).lower().strip(" .,")
+                if len(two) >= 6:
+                    add(" ".join(words[:2]), sym, False)
+    except Exception as e:  # noqa: BLE001
+        print(f"[warn] name index unavailable: {e}", file=sys.stderr)
+
+    _NAME_INDEX = (
+        [(k, v, True) for k, v in sorted(strong.items(), key=lambda kv: -len(kv[0]))]
+        + [(k, v, False) for k, v in sorted(weak.items(), key=lambda kv: -len(kv[0]))]
+    )
+    return _NAME_INDEX
+
+
+def match_symbol(text: str) -> tuple[str, str] | None:
+    """Return (symbol, matched phrase) for the company the headline is about."""
+    low = " " + re.sub(r"\s+", " ", text.lower()) + " "
+
+    # An explicit ticker in brackets is the strongest signal there is.
+    for phrase, sym, _strong in _name_index():
+        if f"({phrase})" in low or f"[{phrase}]" in low:
+            return sym, phrase
+
+    for phrase, sym, strong in _name_index():
+        if strong:
+            if re.search(rf"(?<![a-z0-9]){re.escape(phrase)}(?![a-z0-9])", low):
+                return sym, phrase
+        else:
+            # Capitalised in the headline only: a proper noun, not a word.
+            pat = re.compile(rf"(?<![A-Za-z0-9]){re.escape(phrase)}(?![A-Za-z0-9])", re.I)
+            for m in pat.finditer(text):
+                if not m.group()[0].isupper():
+                    continue
+                head = text[max(0, m.start() - 14):m.start()]
+                if re.search(rf"(?<![A-Za-z]){GEO_QUALIFIER}\s+$", head):
+                    continue      # 'West Bengal' is a state, not Bengal & Assam
+                return sym, phrase
+    return None
+
+
+def classify(title: str) -> tuple[str, str, str] | None:
+    """(kind, label, why) — kind is EVENT or SYSTEMIC."""
+    low = title.lower()
+    for pattern, label, why in SYSTEMIC:
+        if re.search(pattern, low, re.I):
+            return "SYSTEMIC", label, why
+    for pattern, label, why in EVENTS:
+        if re.search(pattern, low, re.I):
+            return "EVENT", label, why
+    return None
+
+
+# ---------------------------------------------------------------------------
+# live quote for the reaction line
+# ---------------------------------------------------------------------------
+def quote(symbol: str) -> dict | None:
+    """Last price, day move and volume versus its own 20-day average."""
+    try:
+        import yfinance as yf
+        df = yf.download(f"{symbol}.NS", period="1mo", interval="1d",
+                         progress=False, auto_adjust=False)
+        if df is None or df.empty:
+            return None
+        # One ticker still comes back with a two-level column index
+        # (field, ticker). Dropping the wrong level left the columns named
+        # after the ticker, so every lookup raised and the reaction line was
+        # silently blank. Keep whichever level actually names the fields.
+        cols = df.columns
+        if hasattr(cols, "levels"):
+            for i in range(cols.nlevels):
+                if "Close" in cols.get_level_values(i):
+                    df.columns = cols.get_level_values(i)
+                    break
+        close = df["Close"].dropna()
+        vol = df["Volume"].dropna()
+        if len(close) < 2:
+            return None
+        last, prev = float(close.iloc[-1]), float(close.iloc[-2])
+        avg_vol = float(vol.iloc[-21:-1].mean()) if len(vol) > 5 else 0.0
+        day_vol = float(vol.iloc[-1])
+        return {
+            "last": last,
+            "change_pct": (last / prev - 1) * 100 if prev else 0.0,
+            "volume_x": (day_vol / avg_vol) if avg_vol > 0 else None,
+        }
+    except Exception:
+        return None
+
+
+def _reaction_line(q: dict | None) -> str:
+    if not q:
+        return ""
+    bits = [f"<b>{q['last']:,.2f}</b> ({q['change_pct']:+.2f}%)"]
+    if q.get("volume_x"):
+        bits.append(f"volume {q['volume_x']:.1f}x its 20-day average")
+    return "\nNow: " + " · ".join(bits)
+
+
+# ---------------------------------------------------------------------------
+# event scanner
 # ---------------------------------------------------------------------------
 def _parse_feed(name: str, url: str):
     try:
@@ -265,10 +552,7 @@ def _parse_feed(name: str, url: str):
         return []
 
     items = []
-    # ET-style feeds use CDATA; others put plain text in <title>.
-    for m in re.finditer(
-        r"<item>(.*?)</item>", r.text, re.S | re.I
-    ):
+    for m in re.finditer(r"<item>(.*?)</item>", r.text, re.S | re.I):
         block = m.group(1)
         tm = re.search(r"<title>\s*(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?\s*</title>", block, re.S | re.I)
         lm = re.search(r"<link>\s*(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?\s*</link>", block, re.S | re.I)
@@ -276,27 +560,17 @@ def _parse_feed(name: str, url: str):
             continue
         title = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", tm.group(1))).strip()
         link = (lm.group(1).strip() if lm else "")
-        if not title:
-            continue
-        items.append({"title": title, "link": link, "source": name})
+        if title:
+            items.append({"title": title, "link": link, "source": name})
     return items
 
 
-def _classify(title: str):
-    low = title.lower()
-    for table, tier in ((CRITICAL, "CRITICAL"), (HIGH, "HIGH")):
-        for pattern, label, why in table:
-            if re.search(pattern, low, re.I):
-                return tier, label, why
-    return None, None, None
-
-
-def scan_news(state: dict, dry: bool) -> list[str]:
+def scan_events(state: dict, dry: bool) -> list[str]:
     seen = state.setdefault("seen_news", {})
     now_iso = datetime.now().isoformat(timespec="seconds")
-    # First ever run: learn the current headlines instead of dumping them all.
-    warm_up = not seen
+    warm_up = not seen          # first run learns the backlog, sends nothing
     found = []
+
     for name, url in FEEDS:
         for item in _parse_feed(name, url):
             low = item["title"].lower()
@@ -309,28 +583,43 @@ def scan_news(state: dict, dry: bool) -> list[str]:
             if warm_up:
                 continue
 
-            tier, label, why = _classify(item["title"])
-            if not tier:
+            kind = classify(item["title"])
+            if not kind:
                 continue
-            # HIGH-tier items must actually be about India; CRITICAL always passes.
-            if tier != "CRITICAL" and not (
-                INDIA_SIGNALS.search(item["title"]) or COMPANY_HINTS.search(item["title"])
-            ):
-                continue
+            kind, label, why = kind
+
+            if kind == "SYSTEMIC":
+                sym, reaction = None, None
+            else:
+                hit = match_symbol(item["title"])
+                if not hit:
+                    continue          # no company named, no alert
+                sym, _phrase = hit
+                if _cooled(state, f"stock:{sym}", 240):
+                    continue          # one alert per stock per four hours
+                reaction = quote(sym)
+                if label in REACTION_GATED and reaction is not None:
+                    moved = abs(reaction.get("change_pct") or 0) >= MIN_REACTION_PCT
+                    busy = (reaction.get("volume_x") or 0) >= MIN_REACTION_VOL
+                    if not (moved or busy):
+                        print(f"  · {sym} {label}: no price reaction "
+                              f"({reaction.get('change_pct', 0):+.2f}%, "
+                              f"{(reaction.get('volume_x') or 0):.1f}x volume) — held back")
+                        continue
+
             if not _global_rate_ok(state):
                 continue
-            if tier != "CRITICAL" and _cooled(state, f"news:{label}", 45):
-                # already alerted this category recently; still record as seen
-                continue
 
-            icon = "🚨" if tier == "CRITICAL" else "📰"
             stamp = datetime.now().strftime("%d %b %Y, %H:%M IST")
+            head = (f"🚨 <b>{esc(sym)} · {esc(label)}</b>" if sym
+                    else f"🚨 <b>{esc(label)}</b>")
             body = (
-                f"{icon} <b>{tier} · {esc(label)}</b>\n"
+                f"{head}\n"
                 f"<i>{stamp}</i>\n"
                 f"───────────────\n"
                 f"<b>{esc(item['title'])}</b>\n"
-                f"<i>{esc(item['source'])}</i>\n\n"
+                f"<i>{esc(item['source'])}</i>"
+                f"{_reaction_line(reaction)}\n\n"
                 f"<i>Why it matters: {esc(why)}</i>"
             )
             if item["link"]:
@@ -338,124 +627,77 @@ def scan_news(state: dict, dry: bool) -> list[str]:
             body += "\n\n<i>Educational only — not advice.</i>"
 
             if send_telegram(body, dry=dry):
-                found.append(item["title"])
+                if not dry:
+                    _audit(sym, label, item["title"], item["source"], item["link"])
+                print(f"  → {sym or 'market'} · {label}: {item['title'][:80]}")
+                found.append(f"{sym or 'market'}: {item['title'][:60]}")
                 state.setdefault("sent_log", []).append(now_iso)
-                _mark(state, f"news:{label}")
-            if len(found) >= 4:      # cap a single run so we never spam
+                if sym:
+                    _mark(state, f"stock:{sym}")
+            if len(found) >= 3:
                 return found
     return found
 
 
 # ---------------------------------------------------------------------------
-# price scanner
+# shock scanner
 # ---------------------------------------------------------------------------
-def _nifty_and_vix():
-    out = {}
-    try:
-        import yfinance as yf
-    except Exception:
-        return out
-    try:
-        df = yf.download(["^NSEI", "^INDIAVIX"], period="5d", interval="1d",
-                         progress=False, auto_adjust=False, threads=True)
-        closes = df["Close"]
-        for col, name in (("^NSEI", "nifty"), ("^INDIAVIX", "vix")):
-            if col not in closes:
-                continue
-            series = closes[col].dropna()
-            if len(series) >= 2:
-                last, prev = float(series.iloc[-1]), float(series.iloc[-2])
-                out[name] = {"close": last, "change_pct": (last / prev - 1) * 100}
-    except Exception:
-        pass
-    return out
-
-
-def scan_prices(state: dict, dry: bool) -> list[str]:
+def scan_shocks(state: dict, dry: bool) -> list[str]:
     sent = []
-    data = _nifty_and_vix()
-    nifty = data.get("nifty")
-    vix = data.get("vix")
-
-    if nifty:
-        chg = nifty["change_pct"]
-        bucket = int(abs(chg) // NIFTY_STEP_PCT)
-        if bucket > state.get("nifty_bucket", 0):
-            state["nifty_bucket"] = bucket
-            direction = "up" if chg > 0 else "down"
-            icon = "🚀" if chg > 0 else "🔻"
-            body = (
-                f"{icon} <b>Nifty 50 {direction} {chg:+.2f}%</b>\n"
-                f"<i>{datetime.now().strftime('%d %b %Y, %H:%M IST')}</i>\n"
-                f"───────────────\n"
-                f"Index at <b>{nifty['close']:,.2f}</b>.\n\n"
-                f"<i>Why it matters: a move of this size usually means a macro or global "
-                f"catalyst, not stock-specific news. Check breadth before adding risk.</i>"
-            )
-            if send_telegram(body, dry=dry):
-                sent.append("nifty")
-                state.setdefault("sent_log", []).append(datetime.now().isoformat(timespec="seconds"))
-    if nifty and abs(nifty["change_pct"]) < NIFTY_STEP_PCT * 0.5:
-        state["nifty_bucket"] = 0
-
-    if vix:
-        level = vix["close"]
-        bucket = max([b for b in VIX_LEVELS if level >= b], default=0)
-        if bucket > state.get("vix_bucket", 0):
-            state["vix_bucket"] = bucket
-            body = (
-                f"⚠️ <b>India VIX through {bucket}</b>\n"
-                f"<i>{datetime.now().strftime('%d %b %Y, %H:%M IST')}</i>\n"
-                f"───────────────\n"
-                f"VIX at <b>{level:.2f}</b> ({vix['change_pct']:+.1f}%).\n\n"
-                f"<i>Why it matters: implied volatility is repricing. Option premiums get "
-                f"expensive and stop distances need widening — or size down.</i>"
-            )
-            if send_telegram(body, dry=dry):
-                sent.append("vix")
-                state.setdefault("sent_log", []).append(datetime.now().isoformat(timespec="seconds"))
-        elif level < VIX_LEVELS[0] * 0.8:
-            state["vix_bucket"] = 0
-
-    # single-stock shocks
     try:
         import yfinance as yf
-        symbols = [s for s in ALERT_UNIVERSE.split(",") if s]
+        symbols = shock_symbols()
         tickers = [f"{s}.NS" for s in symbols]
-        df = yf.download(tickers, period="5d", interval="1d",
+        df = yf.download(tickers, period="3mo", interval="1d",
                          progress=False, auto_adjust=False, threads=True)
-        closes = df["Close"]
+        closes, vols = df["Close"], df["Volume"]
         hits = []
-        for sym, ticker in zip(symbols, tickers):
-            if ticker not in closes:
+        for sym, t in zip(symbols, tickers):
+            if t not in closes:
                 continue
-            series = closes[ticker].dropna()
-            if len(series) < 2:
+            c = closes[t].dropna()
+            v = vols[t].dropna() if t in vols else None
+            if len(c) < 2:
                 continue
-            last, prev = float(series.iloc[-1]), float(series.iloc[-2])
+            last, prev = float(c.iloc[-1]), float(c.iloc[-2])
             chg = (last / prev - 1) * 100
-            if abs(chg) >= STOCK_MOVE_PCT:
-                hits.append((sym, last, chg))
+            if abs(chg) < SHOCK_PCT:
+                continue
+            avg = float(v.iloc[-21:-1].mean()) if v is not None and len(v) > 5 else 0.0
+            today = float(v.iloc[-1]) if v is not None and len(v) else 0.0
+            volx = (today / avg) if avg > 0 else None
+            # A big move on ordinary volume is usually stale data or a block
+            # print; require participation before calling it news.
+            if volx is not None and volx < SHOCK_VOLUME_X:
+                continue
+            hits.append((sym, last, chg, volx))
+
         hits.sort(key=lambda x: -abs(x[2]))
-        for sym, last, chg in hits[:3]:
-            if _cooled(state, f"stock:{sym}", 90):
+        for sym, last, chg, volx in hits[:3]:
+            if _cooled(state, f"shock:{sym}", 240):
                 continue
             icon = "📈" if chg > 0 else "📉"
             body = (
                 f"{icon} <b>{esc(sym)} {chg:+.2f}%</b>\n"
                 f"<i>{datetime.now().strftime('%d %b %Y, %H:%M IST')}</i>\n"
                 f"───────────────\n"
-                f"Last <b>{last:,.2f}</b>.\n\n"
-                f"<i>Why it matters: a one-stock move this large is usually news or a block "
-                f"deal. Check for results, orders or a stake sale before acting.</i>"
+                f"Last <b>{last:,.2f}</b>"
+                + (f" · volume {volx:.1f}x its 20-day average" if volx else "")
+                + f"\n\n<i>Why it matters: a {abs(chg):.0f}% move on this volume is money "
+                  f"changing its mind, not drift. Look for results, an order or a block "
+                  f"deal before acting.</i>\n\n<i>Educational only — not advice.</i>"
             )
             if send_telegram(body, dry=dry):
+                if not dry:
+                    _audit(sym, "price shock", f"{chg:+.2f}% on {volx or 0:.1f}x volume",
+                           "price", "")
+                print(f"  → {sym} · shock {chg:+.2f}%")
                 sent.append(sym)
-                _mark(state, f"stock:{sym}")
-                state.setdefault("sent_log", []).append(datetime.now().isoformat(timespec="seconds"))
-    except Exception as e:
-        print(f"[price scan skipped: {e}]", file=sys.stderr)
-
+                _mark(state, f"shock:{sym}")
+                state.setdefault("sent_log", []).append(
+                    datetime.now().isoformat(timespec="seconds"))
+    except Exception as e:  # noqa: BLE001
+        print(f"[shock scan skipped: {e}]", file=sys.stderr)
     return sent
 
 
@@ -475,7 +717,8 @@ def main() -> int:
         send_telegram(
             "🔔 <b>Test alert</b>\n"
             f"<i>{datetime.now().strftime('%d %b %Y, %H:%M IST')}</i>\n\n"
-            "Automation is alive. News alerts run 24×7, price alerts during market hours.",
+            "Event alerts are live: one message when a named NSE stock is being "
+            "moved by news, plus 6% shocks on volume.",
             dry=dry,
         )
         save_state(state)
@@ -483,17 +726,23 @@ def main() -> int:
 
     sent = []
     if not prices_only:
-        sent += scan_news(state, dry)
+        sent += scan_events(state, dry)
 
     if not news_only and cal.is_market_open():
-        sent += scan_prices(state, dry)
+        sent += scan_shocks(state, dry)
     elif not news_only:
-        print(f"Market closed ({datetime.now():%H:%M}) — news only.")
+        print(f"Market closed ({datetime.now():%H:%M}) — event scan only.")
 
     if not dry:
         save_state(state)
-    print(f"{len(sent)} alert(s) sent." if sent else "No alerts triggered.")
+    if not sent:
+        print("No alerts triggered.")
+    elif dry:
+        print(f"{len(sent)} alert(s) would be sent.")
+    else:
+        print(f"{len(sent)} alert(s) sent.")
     return 0
+
 
 if __name__ == "__main__":
     raise SystemExit(main())
