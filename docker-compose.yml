@@ -1,0 +1,26 @@
+# Always-on market desk: one service, restart-safe, data on the host.
+#
+#   cp .env.example .env && edit it      # bot token, invite code
+#   docker compose up -d --build
+#
+# ./data is mounted whole (not file-by-file) so a missing file never becomes a
+# directory. It holds the candle cache (~2,400 CSVs), the recommendation
+# scorecard and the subscriber list — the things a rebuild must not wipe.
+services:
+  desk:
+    build: .
+    image: market-desk:latest
+    container_name: market-desk
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TZ: Asia/Kolkata
+    volumes:
+      - ./data:/app/data
+      - ./reports:/app/reports
+      - ./logs:/app/logs
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"

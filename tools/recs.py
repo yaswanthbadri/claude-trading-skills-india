@@ -201,12 +201,18 @@ def evaluate() -> dict:
     changed = 0
     today = date.today().isoformat()
 
+    # A verdict needs a finished candle. Until the 15:30 close, today's bar is
+    # still moving, so grading it would call a stop-out that may not happen.
+    now = datetime.now()
+    session_done = (now.hour, now.minute) >= (15, 35)
+
     for rec in store["records"]:
         if rec["status"] in ("t2_hit", "stopped", "no_fill", "expired"):
             continue
 
         bars = [b for b in _bars(rec["symbol"])
-                if b["date"] >= (rec.get("live_from") or rec["date"])]
+                if b["date"] >= (rec.get("live_from") or rec["date"])
+                and (b["date"] != today or session_done)]
         if not bars:
             continue
 

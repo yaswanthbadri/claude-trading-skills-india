@@ -28,6 +28,9 @@ DATA = REPO / "data"
 OUT = DATA / "universe.csv"
 
 NSE_URL = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
+# Industry labels for the liquid names. Not every symbol is in the index, so
+# anything missing simply carries no sector rather than a guessed one.
+IND_URL = "https://niftyindices.com/IndexConstituent/ind_niftytotalmarket_list.csv"
 UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
 
 # Symbols that are not ordinary equity or break yfinance tickers.
@@ -54,6 +57,25 @@ def fetch_nse() -> list[dict]:
     return rows
 
 
+def fetch_industries() -> dict[str, str]:
+    """symbol -> industry, from the NSE total-market index constituents."""
+    try:
+        req = urllib.request.Request(IND_URL, headers=UA)
+        raw = urllib.request.urlopen(req, timeout=45).read().decode("utf-8", "replace")
+    except Exception as e:  # noqa: BLE001
+        print(f"[warn] industry list unavailable ({e}); sectors will be blank",
+              file=sys.stderr)
+        return {}
+    out = {}
+    for raw_row in csv.DictReader(io.StringIO(raw)):
+        r = {k.strip(): (v or "").strip() for k, v in raw_row.items() if k}
+        sym = r.get("Symbol", "").upper()
+        ind = r.get("Industry", "")
+        if sym and ind:
+            out[sym] = ind
+    return out
+
+
 def fetch_bse(path: Path) -> list[dict]:
     """Optional: a BSE scrip list you download yourself."""
     out = []
@@ -71,11 +93,16 @@ def fetch_bse(path: Path) -> list[dict]:
 
 def build(bse_csv: Path | None = None) -> list[dict]:
     rows = fetch_nse()
+    industry = fetch_industries()
+    for r in rows:
+        r["industry"] = industry.get(r["symbol"].upper(), "")
     if bse_csv:
         rows += fetch_bse(bse_csv)
     DATA.mkdir(parents=True, exist_ok=True)
     with OUT.open("w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["symbol", "name", "isin", "series", "exchange"])
+        w = csv.DictWriter(
+            f, fieldnames=["symbol", "name", "industry", "isin", "series", "exchange"],
+            extrasaction="ignore")
         w.writeheader()
         w.writerows(rows)
     return rows
@@ -91,6 +118,12 @@ def load() -> list[dict]:
 
 def symbols() -> list[str]:
     return [r["symbol"] for r in load()]
+
+
+def sector_map() -> dict[str, str]:
+    """symbol -> industry, tolerant of an older universe file with no column."""
+    return {r["symbol"]: (r.get("industry") or "")
+            for r in load() if r.get("symbol")}
 
 
 def main() -> int:

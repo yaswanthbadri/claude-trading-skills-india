@@ -386,7 +386,19 @@ def analyse(raw_results: list, plans_by_symbol: dict | None = None,
         scored.append((score, grade, parts, raw, df, study, age))
 
     scored.sort(key=lambda x: -x[0])
-    shortlist = scored[:top_n]
+
+    # Same rule as the plan picks: two names per sector at most, so the deep
+    # section is a diversified idea list rather than a single macro bet.
+    shortlist, per_sector = [], {}
+    for row in scored:
+        sec = ((row[3].get("sector") or "") if len(row) > 3 else "").strip()
+        if sec:
+            if per_sector.get(sec, 0) >= 2:
+                continue
+            per_sector[sec] = per_sector.get(sec, 0) + 1
+        shortlist.append(row)
+        if len(shortlist) >= top_n:
+            break
 
     out = []
     for score, grade, parts, raw, df, study, age in shortlist:
@@ -512,6 +524,7 @@ def analyse(raw_results: list, plans_by_symbol: dict | None = None,
             "low_52w": tt.get("low_52w"),
             "from_high_pct": raw.get("from_high_pct"),
             "liquidity_cr": (raw.get("liquidity") or {}).get("avg_traded_value_cr"),
+            "sector": raw.get("sector") or "",
             "base": {
                 "type": base.get("type"), "grade": base.get("grade"),
                 "weeks": base.get("weeks"), "depth_pct": base.get("depth_pct"),

@@ -1,0 +1,6 @@
+# Runtime dependencies for the automated market desk.
+# Pinned loosely on purpose: these are stable APIs, and yfinance ships fixes
+# for exchange quirks often enough that a hard pin breaks more than it protects.
+requests>=2.31
+yfinance>=0.2.40
+pandas>=2.0

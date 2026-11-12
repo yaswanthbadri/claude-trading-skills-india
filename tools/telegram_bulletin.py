@@ -24,6 +24,10 @@ from pathlib import Path
 
 import requests
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import notify
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REPORTS_DIR = REPO_ROOT / "reports"
 ENV_FILE = REPO_ROOT / ".env"
@@ -233,8 +237,10 @@ def msg_plan(p: dict) -> str:
     else:
         verdict = "👀 WATCH ONLY — not Stage 2, paper-trade at best"
 
+    _sec = (p.get("sector") or "").strip()
     lines = [
-        f"🎯 <b>{esc(p['symbol'])}</b>   · {esc(p['base_type'] or '')} {esc(p['base_grade'] or '')} base",
+        f"🎯 <b>{esc(p['symbol'])}</b>   · {esc(p['base_type'] or '')} {esc(p['base_grade'] or '')} base"
+        + (f"  · {esc(_sec)}" if _sec else ""),
         f"<i>{verdict}</i>",
         f"<i>close {n(p['close'])} · pivot {n(p['pivot'])} ({pct(p['from_pivot_pct'])})</i>",
         "",
@@ -315,12 +321,13 @@ def msg_calls(d: dict) -> str:
            f"<i>last {card['sessions_window']} sessions</i>",
            ""]
     out.append(f"Filled <b>{card['fills']}/{card['attempted']}</b> triggers "
-               f"({card['fill_rate_pct']:.0f}%)")
+               f"({_pct0(card.get('fill_rate_pct'))})")
     if card.get("decided"):
         out.append(f"Hit a target <b>{card['wins']}/{card['decided']}</b> "
-                   f"({card['hit_rate_pct']:.0f}%)")
-    out.append(f"Average <b>{card['avg_r']:+.1f}R</b> · total "
-               f"{card['total_r']:+.1f}R" if card.get("avg_r") is not None else "")
+                   f"({_pct0(card.get('hit_rate_pct'))})")
+    if card.get("avg_r") is not None:
+        out.append(f"Average <b>{card['avg_r']:+.1f}R</b> · total "
+                   f"{card['total_r']:+.1f}R")
 
     closed = card.get("closed_rows") or []
     if closed:
@@ -345,6 +352,10 @@ def msg_calls(d: dict) -> str:
         for f in focus[:4]:
             out.append(f"• {esc(f)}")
     return "\n".join(x for x in out if x != "")
+
+
+def _pct0(v) -> str:
+    return "—" if v is None else f"{v:.0f}%"
 
 
 def _calls_status(s: str) -> str:
@@ -402,10 +413,8 @@ def main() -> int:
     ap.add_argument("--no-docs", action="store_true")
     args = ap.parse_args()
 
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-    if not token or not chat_id:
-        print("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID.", file=sys.stderr)
+    if not os.environ.get("TELEGRAM_BOT_TOKEN"):
+        print("Missing TELEGRAM_BOT_TOKEN.", file=sys.stderr)
         return 2
 
     md_path = args.file or latest_bulletin()
@@ -416,18 +425,25 @@ def main() -> int:
     json_path = md_path.with_suffix(".json")
     if json_path.exists():
         data = json.loads(json_path.read_text())
-        send_all(token, chat_id, build_messages(data))
+        chunks = build_messages(data)
     else:
         # Legacy fallback: send the markdown as one plain message.
-        send_message(token, chat_id, esc(md_path.read_text())[:MAX_LEN])
+        chunks = [esc(md_path.read_text())[:MAX_LEN]]
 
-    if not args.no_docs:
-        html_path = md_path.with_suffix(".html")
-        if html_path.exists():
-            send_document(token, chat_id, html_path,
-                          "Full report (styled HTML — best on desktop)")
+    html_path = None if args.no_docs else md_path.with_suffix(".html")
+    if html_path is not None and not html_path.exists():
+        html_path = None
 
-    print(f"Sent {md_path.name} to chat {chat_id}")
+    res = notify.broadcast(
+        chunks,
+        document=html_path,
+        caption="Full report (styled HTML — best on desktop)",
+    )
+    if not res["sent"]:
+        print(f"Delivery failed for every chat: {res}", file=sys.stderr)
+        return 3
+    print(f"Sent {md_path.name} to {res['sent']}/{res['audience']} chat(s)"
+          + (f"; failed {res['failed']}" if res["failed"] else ""))
     return 0
 
 

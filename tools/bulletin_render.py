@@ -8,6 +8,7 @@ so rows stack into readable cards on a phone.
 from __future__ import annotations
 
 import html as _h
+from datetime import date
 
 QUAD_CLASS = {
     "Leading": "q-lead",
@@ -214,6 +215,10 @@ def _status_label(status: str) -> str:
     }.get(status, status)
 
 
+def _pct0(v) -> str:
+    return "—" if v is None else f"{v:.0f}%"
+
+
 def _r_fmt(r) -> str:
     if r is None:
         return "—"
@@ -241,10 +246,13 @@ def _calls_md(d: dict, sec=None) -> list[str]:
 
     L.append(f"**Last {card['sessions_window']} sessions.** "
              f"{card['fills']} of {card['attempted']} triggers filled "
-             f"({card['fill_rate_pct']:.0f}%). Of the filled trades that reached a decision, "
-             f"{card['wins']} of {card['decided']} hit a target "
-             f"({card['hit_rate_pct']:.0f}%), average {_r_fmt(card['avg_r'])}, "
-             f"{_r_fmt(card['total_r'])} across the sample.")
+             f"({_pct0(card['fill_rate_pct'])}). "
+             + (f"Of the filled trades that reached a decision, {card['wins']} of "
+                f"{card['decided']} hit a target ({_pct0(card['hit_rate_pct'])}), "
+                f"average {_r_fmt(card['avg_r'])}, {_r_fmt(card['total_r'])} across "
+                f"the sample."
+                if card.get("decided") else
+                "None has reached a target or a stop yet — the sample is still open."))
     L.append("")
 
     closed = card.get("closed_rows") or []
@@ -303,9 +311,12 @@ def _calls_html(a, d: dict, h2) -> None:
 
     a(f"<div class='callout'><b>Last {card['sessions_window']} sessions.</b> "
       f"{card['fills']} of {card['attempted']} triggers filled "
-      f"({card['fill_rate_pct']:.0f}%). Of the trades that reached a decision, "
-      f"{card['wins']} of {card['decided']} hit a target ({card['hit_rate_pct']:.0f}%), "
-      f"average {_r_fmt(card['avg_r'])}, {_r_fmt(card['total_r'])} across the sample.</div>")
+      f"({_pct0(card['fill_rate_pct'])}). "
+      + (f"Of the trades that reached a decision, {card['wins']} of {card['decided']} "
+         f"hit a target ({_pct0(card['hit_rate_pct'])}), average {_r_fmt(card['avg_r'])}, "
+         f"{_r_fmt(card['total_r'])} across the sample.</div>"
+         if card.get("decided") else
+         "None has reached a target or a stop yet.</div>"))
 
     closed = card.get("closed_rows") or []
     a("<div class='dhd'>Closed today</div>")
@@ -364,7 +375,9 @@ def _deep_md(d: dict, sec=None) -> list[str]:
         L.append(f"### {i}. {c['symbol']} — grade {c['grade']} · "
                  f"{c['score']:.0f}/100 · RS {c.get('rs_rating') or 'n/a'}")
         L.append("")
-        L.append(f"_{b.get('type') or 'no base'} {b.get('grade') or ''} · "
+        _sec = (c.get("sector") or "").strip()
+        L.append(f"_{(_sec + ' · ') if _sec else ''}"
+                 f"{b.get('type') or 'no base'} {b.get('grade') or ''} · "
                  f"{_n(b.get('weeks'), 1)} weeks · {c.get('structure')} entry · "
                  f"₹{_n(c.get('liquidity_cr'), 0)} crore/day_")
         L.append("")
@@ -455,6 +468,12 @@ def render_md(d: dict) -> str:
       f"{'price above both' if (idx['close'] or 0) > (idx['sma50'] or 0) else 'below 50 DMA'} |")
     a(f"| RSI(14) | {idx['rsi']} | >70 overbought, <30 oversold |")
     a(f"| ADX(14) | {idx['adx']} | >25 means a trending market |")
+    _uni = d.get("universe") or {}
+    if _uni.get("last_bar"):
+        _stale = bool(_uni.get("stale"))
+        a(f"| Data | last bar {_uni['last_bar']} | "
+          + ("**stale — the cache has not caught up**" if _stale
+             else "today's session is in the scan") + " |")
     a("")
 
     a(f"**Bottom line:** {verdict(reg)}")
@@ -563,7 +582,9 @@ def render_md(d: dict) -> str:
             vlabel, _ = plan_verdict(p)
             a(f"### {p['symbol']} — {vlabel}")
             a("")
-            a(f"_{stage} · {p['base_type']} base grade {p['base_grade']}_")
+            _sec = (p.get("sector") or "").strip()
+            a(f"_{(_sec + ' · ') if _sec else ''}{stage} · {p['base_type']} "
+              f"base grade {p['base_grade']}_")
             a("")
             a(f"- Close {_n(p['close'])} · pivot {_n(p['pivot'])} · {_pct(p['from_pivot_pct'])} from pivot")
             a(f"- **Buy above {_n(p['trigger'])}** (limit {_n(p['limit'])})")
@@ -933,6 +954,15 @@ footer{
       f"<div class='v sm'>{_n(idx['sma50'])} / {_n(idx['sma200'])}</div>"
       f"<div class='s'>price {'above' if (idx['close'] or 0) > (idx['sma50'] or 0) else 'below'} the 50 DMA</div></div>")
     a("</div>")
+    _uni = d.get("universe") or {}
+    if _uni.get("last_bar"):
+        _stale = bool(_uni.get("stale"))
+        a("<div class='callout " + ("warn" if _stale else "") + "' style='margin-top:14px'>"
+          f"<b>Data.</b> Last bar <b>{_h.escape(str(_uni['last_bar']))}</b> across "
+          f"{_n(_uni.get('files'), 0)} symbols — "
+          + ("the cache has not caught up with today, so treat every level as "
+             "yesterday's." if _stale else "today's session is in the scan.")
+          + "</div>")
     a(f"<div class='callout {pill_cls}' style='margin-top:14px'><b>Bottom line.</b> "
       f"{_h.escape(verdict(reg))}</div>")
     try:
@@ -1096,7 +1126,9 @@ footer{
               f"{c['score']:.0f}/100</span>"
               f"<span class='badge'>Stage {c.get('tt_passed')}/{c.get('tt_total')}</span>"
               f"<span class='badge'>RS {c.get('rs_rating') or 'n/a'}</span>"
-              f"<span class='meta'>{_h.escape(str(b.get('type') or 'no base'))} "
+              f"<span class='meta'>{_h.escape(str(c.get('sector') or ''))}"
+              f"{' · ' if c.get('sector') else ''}"
+              f"{_h.escape(str(b.get('type') or 'no base'))} "
               f"{_h.escape(str(b.get('grade') or ''))} · {_n(b.get('weeks'), 1)} weeks · "
               f"{_h.escape(c.get('structure') or '')} entry · "
               f"₹{_n(c.get('liquidity_cr'), 0)} crore/day</span></div>")
@@ -1181,7 +1213,9 @@ footer{
             a("<div class='plan'>")
             a(f"<div class='plan-head'><span class='name'>{_h.escape(p['symbol'] or '')}</span>"
               f"{stage}<span class='badge g-{g}'>{_h.escape(p['base_type'] or '')} {_h.escape(p['base_grade'] or '')}</span>"
-              f"<span class='meta'>{_h.escape(vlabel)} · close {_n(p['close'])} · "
+              f"<span class='meta'>{_h.escape(str(p.get('sector') or ''))}"
+              f"{' · ' if p.get('sector') else ''}"
+              f"{_h.escape(vlabel)} · close {_n(p['close'])} · "
               f"pivot {_n(p['pivot'])} ({_pct(p['from_pivot_pct'])})</span></div>")
             a("<div class='plan-body'><div class='lvls'>")
             a(f"<div class='lvl entry'><div class='k'>Buy above</div>"

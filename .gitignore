@@ -21,3 +21,10 @@ launch/
 data/candles/
 data/nifty.csv
 data/cache_state.json
+
+# Runtime state and private data
+data/subscribers.json
+data/recommendations.json
+data/universe.csv.tmp
+logs/
+reports/

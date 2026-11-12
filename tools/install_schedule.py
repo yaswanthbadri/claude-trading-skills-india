@@ -6,6 +6,7 @@ Jobs
     com.tradingskills.daily      morning plan, 09:00, Mon-Fri
     com.tradingskills.eod        closing review, 16:00, Mon-Fri
     com.tradingskills.alerts     news + price alerts, every 5 minutes, 24x7
+    com.tradingskills.bot        Telegram listener, kept alive (interim)
     com.tradingskills.cache      candle cache refresh, hourly + post-close
 
 Holiday handling is inside the scripts, not here (a holiday list changes).
@@ -101,6 +102,18 @@ def build_plists() -> dict[str, str]:
     plists["com.tradingskills.daily"] = (
         _base("com.tradingskills.daily", "daily_bulletin.py", ["--mode", "daily"])
         + _calendar(daily_entries)
+        + FOOTER
+    )
+
+    # The listener answers /start, /stop, /status. Kept alive so a crash does
+    # not silently cut people off. Interim: the cloud scheduler supervises this
+    # itself, so unload this job after the move.
+    plists["com.tradingskills.bot"] = (
+        _base("com.tradingskills.bot", "bot_listener.py", [])
+        + "  <key>KeepAlive</key>\n  <true/>\n"
+        + "  <key>RunAtLoad</key>\n  <true/>\n"
+        + f"  <key>StandardOutPath</key>\n  <string>{LOGS / 'bot.log'}</string>\n"
+        + f"  <key>StandardErrorPath</key>\n  <string>{LOGS / 'bot.log'}</string>\n"
         + FOOTER
     )
 

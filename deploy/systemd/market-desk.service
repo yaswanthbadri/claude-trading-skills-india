@@ -1,0 +1,28 @@
+# Alternative to Docker: run the same scheduler under systemd.
+#
+#   sudo cp deploy/systemd/market-desk.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now market-desk
+#
+# Assumes the code is at /opt/market-desk and dependencies are installed in a
+# virtualenv at /opt/market-desk/.venv:
+#   python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+
+[Unit]
+Description=India market desk (reports, alerts, scorecard)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=market
+WorkingDirectory=/opt/market-desk
+Environment=TZ=Asia/Kolkata
+EnvironmentFile=/opt/market-desk/.env
+ExecStart=/opt/market-desk/.venv/bin/python tools/scheduler.py
+Restart=always
+RestartSec=10
+# The scorecard and the cache are state, not scratch space.
+StateDirectory=market-desk
+
+[Install]
+WantedBy=multi-user.target

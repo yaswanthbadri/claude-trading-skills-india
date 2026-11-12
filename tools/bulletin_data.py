@@ -28,7 +28,9 @@ PYTHON = sys.executable
 # about ten seconds, against several minutes of network calls.
 CACHE = REPO / "data" / "candles"
 BENCH = REPO / "data" / "nifty.csv"
-TOP_SCAN = 60          # how many ranked names the deep analysis can draw from
+TOP_SCAN = 120         # how many ranked names the deep analysis can draw from
+MAX_PER_SECTOR = 2     # two banks is a sector bet, three is a profile
+MIN_TURNOVER_CR = 5.0  # ₹5 crore/day: small orders still get a clean fill
 
 # Fallback universe when the cache is missing or stale. Nifty 50 + Next 50 +
 # liquid midcaps, deliberately wide.
@@ -153,6 +155,34 @@ def _scan_args(info: dict | None):
             f"{len(WATCHLIST.split(','))} watchlist symbols (live fetch)")
 
 
+def _sectors() -> dict[str, str]:
+    try:
+        import universe
+        return universe.sector_map()
+    except Exception:
+        return {}
+
+
+def _diversify(rows: list[dict], want: int, per_sector: int = MAX_PER_SECTOR) -> list[dict]:
+    """Keep the ranking, but never let one theme fill the whole slate.
+
+    Three PSU banks is one macro bet dressed up as three ideas. Once a sector
+    has `per_sector` names, the next one is skipped in favour of a different
+    corner of the market.
+    """
+    out, count = [], {}
+    for r in rows:
+        sec = (r.get("sector") or "").strip()
+        if sec:
+            if count.get(sec, 0) >= per_sector:
+                continue
+            count[sec] = count.get(sec, 0) + 1
+        out.append(r)
+        if len(out) >= want:
+            break
+    return out
+
+
 def collect(capital: float = 500_000, risk_pct: float = 1.0,
             candidates: int = 6, motion_top: int = 8) -> dict:
     """Gather the full bulletin dataset."""
@@ -272,10 +302,22 @@ def collect(capital: float = 500_000, risk_pct: float = 1.0,
     # ---- momentum -----------------------------------------------------------
     cinfo = cache_info()
     scan_args, universe_label = _scan_args(cinfo)
+    # "Stale" must mean late, not "before the open". Compare against the newest
+    # bar that should exist at this hour.
+    _last_bar = (cinfo or {}).get("last_bar")
+    _expected = None
+    try:
+        import market_calendar as _cal
+        _expected = _cal.last_session_bar().isoformat()
+    except Exception:
+        pass
+
     data["universe"] = {"label": universe_label,
                         "cached": bool(cinfo and cinfo.get("fresh")),
                         "files": (cinfo or {}).get("files"),
-                        "last_bar": (cinfo or {}).get("last_bar")}
+                        "last_bar": _last_bar,
+                        "expected_bar": _expected,
+                        "stale": bool(_last_bar and _expected and _last_bar < _expected)}
 
     mom = _run_json([PYTHON, str(SK / "momentum-scanner" / "scripts" / "momentum.py"),
                      "scan", *scan_args, "--top", str(motion_top), "--json"]) or {}
@@ -297,6 +339,7 @@ def collect(capital: float = 500_000, risk_pct: float = 1.0,
     # ---- breakouts ----------------------------------------------------------
     bo = _run_json([PYTHON, str(SK / "breakout-planner" / "scripts" / "breakout.py"),
                     "scan", *scan_args, "--top", str(TOP_SCAN), "--json"], timeout=600) or {}
+    sec_map = _sectors()
     setups = []
     for res in bo.get("results", []):
         b = res.get("base") or {}
@@ -304,6 +347,7 @@ def collect(capital: float = 500_000, risk_pct: float = 1.0,
         liq = res.get("liquidity") or {}
         setups.append({
             "symbol": res.get("name"),
+            "sector": sec_map.get(res.get("name") or "", ""),
             "close": _round(res.get("close")),
             "verdict": res.get("verdict"),
             "rank": _round(res.get("rank_score"), 1),
@@ -334,7 +378,10 @@ def collect(capital: float = 500_000, risk_pct: float = 1.0,
         return -ok
 
     ordered = sorted(setups, key=rank_key)
-    picks = [s for s in ordered if s["from_pivot_pct"] is not None and s["from_pivot_pct"] > -12][:candidates]
+    tradable = [s for s in ordered
+                if s["from_pivot_pct"] is not None and s["from_pivot_pct"] > -12
+                and (s["liquidity_cr"] or 0) >= MIN_TURNOVER_CR]
+    picks = _diversify(tradable, candidates)
 
     # ---- trade plans --------------------------------------------------------
     def _plan_cmd(sym: str) -> list[str]:
@@ -357,6 +404,7 @@ def collect(capital: float = 500_000, risk_pct: float = 1.0,
         targets = pl.get("targets") or []
         plans.append({
             "symbol": s["symbol"],
+            "sector": s.get("sector"),
             "stage2": s["stage2"],
             "tt_passed": s["tt_passed"],
             "tt_total": s["tt_total"],

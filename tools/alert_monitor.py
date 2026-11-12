@@ -240,15 +240,15 @@ def send_telegram(text: str, dry: bool = False) -> bool:
         print("\n----- DRY RUN MESSAGE -----")
         print(re.sub(r"<[^>]+>", "", text))
         return True
-    import os
-    import telegram_bulletin as tb
-    tb.load_env()
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-    if not token or not chat_id:
-        print("Missing Telegram credentials", file=sys.stderr)
+    import notify
+    try:
+        res = notify.send(text)
+    except Exception as exc:  # noqa: BLE001
+        print(f"Telegram credentials missing or send failed: {exc}", file=sys.stderr)
         return False
-    tb.send_message(token, chat_id, text)
+    if not res["sent"]:
+        print(f"No subscriber could be reached: {res}", file=sys.stderr)
+        return False
     return True
 
 

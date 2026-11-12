@@ -82,6 +82,21 @@ def next_trading_day(d: date | None = None) -> date:
     return d
 
 
+def last_session_bar(d: date | None = None, now: datetime | None = None) -> date:
+    """The newest daily bar that should exist by now.
+
+    Before the 15:30 close the newest complete bar is yesterday's; after it,
+    today's. Without this, a 09:00 report would always look stale.
+    """
+    d = d or date.today()
+    now = now or datetime.now()
+    if not is_trading_day(d):
+        return previous_trading_day(d)
+    if (now.hour, now.minute) >= (15, 35):
+        return d
+    return previous_trading_day(d)
+
+
 def previous_trading_day(d: date | None = None) -> date:
     d = (d or date.today()) - timedelta(days=1)
     for _ in range(15):
