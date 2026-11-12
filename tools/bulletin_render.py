@@ -1289,6 +1289,14 @@ footer{
                         and p.get("results_sessions") <= 5)
                 a(f"<div class='callout{' warn' if _hot else ''}' "
                   f"style='margin:10px 0 0'>{_h.escape(_res)}</div>")
+            _gate = gate_line(p, markdown=False)
+            if _gate:
+                a(f"<div class='callout warn' style='margin:10px 0 0'>"
+                  f"🚫 {_h.escape(_gate)}</div>")
+            elif p.get("tradability_note"):
+                a(f"<p class='small'>{_h.escape(p['tradability_note'].capitalize())}.</p>")
+            if p.get("deliv_note"):
+                a(f"<p class='small'>Delivery: {_h.escape(p['deliv_note'])}.</p>")
             a("<div class='plan-body'><div class='lvls'>")
             a(f"<div class='lvl entry'><div class='k'>Buy above</div>"
               f"<div class='v'>{_n(p.get('entry'))}</div>"
@@ -1386,6 +1394,14 @@ footer{
                         and p.get("results_sessions") <= 5)
                 a(f"<div class='callout{' warn' if _hot else ''}' "
                   f"style='margin:10px 0 0'>{_h.escape(_res)}</div>")
+            _gate = gate_line(p, markdown=False)
+            if _gate:
+                a(f"<div class='callout warn' style='margin:10px 0 0'>"
+                  f"🚫 {_h.escape(_gate)}</div>")
+            elif p.get("tradability_note"):
+                a(f"<p class='small'>{_h.escape(p['tradability_note'].capitalize())}.</p>")
+            if p.get("deliv_note"):
+                a(f"<p class='small'>Delivery: {_h.escape(p['deliv_note'])}.</p>")
             a("<div class='plan-body'><div class='lvls'>")
             a(f"<div class='lvl entry'><div class='k'>Buy above</div>"
               f"<div class='v'>{_n(p['trigger'])}</div>"
