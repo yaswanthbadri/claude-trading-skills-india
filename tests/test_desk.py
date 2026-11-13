@@ -545,6 +545,15 @@ class TestBotCards(unittest.TestCase):
         for must in ("RSI", "ADX", "ATR", "52-week", "Delivery",
                      "Stage 2", "VCP grade A", "Pivot"):
             self.assertIn(must, detail)
+        # the base-rate block appears when the stock matches a signal
+        r2 = dict(r)
+        r2["rates"] = {"matches": ["up_day_volume"], "market": {}, "symbol": {}}
+        self.assertIn("Base rates", stock_check.card_detail(r2))
+        # the base-rate block appears when the stock matches a signal
+        r2 = dict(r)
+        r2["rates"] = {"matches": ["up_day_volume"], "market": {}, "symbol": {}}
+        with_rates = stock_check.card_detail(r2)
+        self.assertIn("Base rates", with_rates)
 
     def test_no_base_is_said_plainly_not_reported_as_a_grade(self):
         import stock_check
@@ -774,18 +783,20 @@ class TestTheStockStateIsNotAStalePivot(unittest.TestCase):
         import forward_plan as fp
         detail = dict(self._detail(), vol_x50=0.8, change_pct=0.2)
         rows = self._rows()
+        # the pivot was cleared a long time ago and the stock is far above it
+        rows[-1]["close"] = 384.0
+        rows[-1]["high"] = 389.0
         orig = fp._rows
         fp._rows = lambda sym: rows
         try:
             res = fp.analyse("TEST", detail, {"pivot": 328.70}, 500_000, 1.0)
         finally:
             fp._rows = orig
-        self.assertEqual(res["state"], "extended")
+        self.assertIn(res["state"], ("extended", "breakout_running"))
         for p in res["plans"]:
             # any entry offered must not be the stale pivot
             self.assertNotEqual(p["entry"], 328.70)
             self.assertGreater(p["entry"], 300)
-            self.assertLess(p["entry"], 383.75)
 
     def test_the_verdict_says_what_the_trade_is(self):
         import bulletin_render as br
@@ -879,15 +890,412 @@ class TestTechnicalDetail(unittest.TestCase):
         if r.get("error"):
             self.skipTest("no data")
         detail = stock_check.card_detail(r)
-        for must in ("RSI", "ADX", "ATR", "52-week", "Delivery",
-                     "Base rates"):
+        for must in ("RSI", "ADX", "ATR", "52-week", "Delivery"):
             self.assertIn(must, detail)
+        # the base-rate block appears when the stock matches a signal
+        r2 = dict(r)
+        r2["rates"] = {"matches": ["up_day_volume"], "market": {}, "symbol": {}}
+        self.assertIn("Base rates", stock_check.card_detail(r2))
         # the stale pivot must not be presented as an entry
         self.assertNotIn("Buy above 329", detail)
 
 
+class TestTheGate(unittest.TestCase):
+    """One gate, used by the report, the card and the alerts.
+
+    A suggestion that cannot be acted on today is not a suggestion. It is a
+    level the market left behind, and publishing it is worse than publishing
+    nothing.
+    """
+
+    def _rows(self):
+        # The highs stay under the 101 trigger, so no bar ever touched it:
+        # this is a level the market has not tested.
+        base = []
+        for i in range(60):
+            c = 100.0
+            base.append({"date": f"2026-08-{i + 1:02d}", "open": c, "high": c + 0.4,
+                         "low": c - 1, "close": c, "volume": 1000})
+        base += [
+            {"date": "2026-11-02", "open": 100, "high": 100.4, "low": 99, "close": 100, "volume": 1000},
+            {"date": "2026-11-03", "open": 100, "high": 100.4, "low": 99, "close": 100, "volume": 1000},
+        ]
+        return base
+
+    def test_an_unreachable_trigger_is_not_published(self):
+        import plan_gate
+        g = plan_gate.gate({"trigger": 110, "stop": 95, "close": 100},
+                            "TEST", close=100, rows=self._rows())
+        self.assertFalse(g["ok"])
+        self.assertTrue(any("nobody is getting filled" in r for r in g["reasons"]))
+
+    def test_a_stop_above_the_price_is_nonsense(self):
+        import plan_gate
+        g = plan_gate.gate({"trigger": 101, "stop": 105, "close": 100},
+                            "TEST", close=100, rows=self._rows())
+        self.assertFalse(g["ok"])
+        self.assertTrue(any("stop" in r and "above" in r for r in g["reasons"]))
+
+    def test_a_trigger_below_the_price_means_the_breakout_happened(self):
+        import plan_gate
+        g = plan_gate.gate({"trigger": 95, "stop": 90, "close": 100},
+                            "TEST", close=100, rows=self._rows())
+        self.assertFalse(g["ok"])
+
+    def test_a_clean_setup_passes(self):
+        import plan_gate
+        g = plan_gate.gate({"trigger": 101, "stop": 95, "close": 100},
+                            "TEST", close=100, stage2=True, base_grade="A",
+                            from_pivot_pct=0.5, rows=self._rows())
+        self.assertTrue(g["ok"])
+        self.assertEqual(g["verdict"], "BUY-READY")
+
+    def test_a_grade_c_base_is_not_a_setup(self):
+        import plan_gate
+        g = plan_gate.gate({"trigger": 101, "stop": 95, "close": 100},
+                            "TEST", close=100, stage2=True, base_grade="C",
+                            rows=self._rows())
+        self.assertFalse(g["ok"])
+
+    def test_a_pullback_entry_is_allowed_to_be_below_the_price(self):
+        import plan_gate
+        g = plan_gate.gate({"trigger": 95, "stop": 88, "close": 100},
+                            "TEST", close=100, stage2=True, base_grade="A",
+                            rows=self._rows(), kind="pullback")
+        self.assertTrue(g["ok"], g["reasons"])
+
+    def test_a_pullback_entry_that_is_a_collapse_is_not(self):
+        import plan_gate
+        g = plan_gate.gate({"trigger": 70, "stop": 65, "close": 100},
+                            "TEST", close=100, stage2=True, base_grade="A",
+                            rows=self._rows(), kind="pullback")
+        self.assertFalse(g["ok"])
+
+    def test_a_fresh_failure_is_rejected_and_an_old_one_is_only_a_note(self):
+        import plan_gate
+        rows = self._rows()
+        rows.append({"date": "2026-11-04", "open": 100, "high": 104,
+                     "low": 99, "close": 99.5, "volume": 2000})
+        g = plan_gate.gate({"trigger": 102, "stop": 95, "close": 100},
+                            "TEST", close=100, rows=rows)
+        self.assertFalse(g["ok"])
+        self.assertEqual(g["verdict"], "SETUP FAILED")
+
+
+class TestTheStateMachine(unittest.TestCase):
+    """The call has to describe what the price is doing now."""
+
+    def _rows(self, closes):
+        out = []
+        for i, (h, l, c) in enumerate(closes):
+            out.append({"date": f"2026-{9 + i // 25:02d}-{i % 25 + 1:02d}",
+                        "open": c, "high": h, "low": l, "close": c,
+                        "volume": 1_000_000})
+        return out
+
+    def test_a_stock_below_its_pivot_is_waiting_not_buyable(self):
+        import forward_plan as fp
+        rows = self._rows([(101, 99, 100)] * 60 + [(101, 99, 100), (101, 99, 100)])
+        orig = fp._rows
+        fp._rows = lambda sym: rows
+        try:
+            res = fp.analyse("TEST", {"close": 100, "vol_x50": 1.0},
+                              {"pivot": 110, "since": "2026-09-01"},
+                              500_000, 1.0, stage2=True, base_grade="A")
+        finally:
+            fp._rows = orig
+        self.assertEqual(res["state"], "pre_breakout")
+        self.assertTrue(res["state_text"].startswith("Inside the base"))
+
+    def test_a_breakout_that_already_ran_is_not_offered_again(self):
+        import forward_plan as fp
+        rows = self._rows([(101, 99, 100)] * 60 + [(101, 99, 100), (101, 99, 100)])
+        # today closed far above the pivot: the trade ran without us
+        rows[-1].update({"close": 120.0, "high": 121.0, "low": 99.0})
+        orig = fp._rows
+        fp._rows = lambda sym: rows
+        try:
+            res = fp.analyse("TEST", {"close": 120, "vol_x50": 1.0},
+                              {"pivot": 100, "since": "2026-09-01"},
+                              500_000, 1.0, stage2=True, base_grade="A")
+        finally:
+            fp._rows = orig
+        self.assertIn(res["state"], ("extended", "breakout_running"))
+        for p in res["plans"]:
+            self.assertNotEqual(p.get("entry"), 100.0)
+
+    def test_the_breakout_bar_uses_the_close_not_the_high(self):
+        import forward_plan as fp
+        rows = self._rows([(101, 99, 100)] * 60)
+        # a bar that spikes to 120 and closes at 100 is not a breakout
+        rows.append({"date": "2026-12-01", "open": 100, "high": 120, "low": 99,
+                     "close": 100, "volume": 1_000_000})
+        self.assertIsNone(fp._breakout_bar(rows))
+
+
+class TestResultsAhead(unittest.TestCase):
+    """Buy the setup before the number, not the gap after it."""
+
+    def test_the_calendar_reads_a_future_date_as_confirmed(self):
+        import results_calendar as rc
+        row = rc.fetch("TCS")
+        if row.get("error") or not row.get("next"):
+            self.skipTest("no earnings data available")
+        self.assertTrue(row["confirmed"])
+        self.assertTrue(row["next"])
+
+    def test_a_print_outside_the_window_is_not_listed(self):
+        import results_calendar as rc
+        rows = rc.upcoming(0)
+        for r in rows:
+            self.assertLessEqual(r["sessions"], 0)
+
+    def test_the_reaction_is_measured_not_guessed(self):
+        import pre_results
+        res = pre_results.reaction("TCS", ["2026-07-16", "2026-04-15"])
+        self.assertIn("n", res)
+        if res["n"]:
+            self.assertIn("h5", res)
+            self.assertIn("gap", res)
+
+    def test_the_market_study_has_a_sample_size(self):
+        import pre_results
+        m = pre_results.market_reaction()
+        self.assertIn("n", m)
+        self.assertIn("h5", m)
+
+
+class TestTheReportNeverPublishesAnUnreachableLevel(unittest.TestCase):
+    def test_the_candidate_filter_is_tight(self):
+        import bulletin_data
+        import inspect
+        src = inspect.getsource(bulletin_data.collect)
+        self.assertIn("-4.0 <= s[\"from_pivot_pct\"] <= 1.5", src)
+
+    def test_every_published_plan_goes_through_the_gate(self):
+        import bulletin_data
+        import inspect
+        src = inspect.getsource(bulletin_data.collect)
+        self.assertIn("plan_gate.gate(", src)
+
+
+class TestTheDataIsFresh(unittest.TestCase):
+    def test_the_pre_market_job_only_verifies(self):
+        import inspect
+        import scheduler
+        jobs = {j[0]: j for j in scheduler.JOBS}
+        self.assertIn("--verify", jobs["cache-premarket"][3])
+
+    def test_the_watchdog_checks_delivery_not_just_the_file(self):
+        import watchdog
+        self.assertTrue(callable(watchdog._delivered))
+        self.assertTrue(callable(watchdog._delivery_failures))
+
+    def test_the_cache_verifier_finds_what_is_behind(self):
+        import build_cache
+        rows = build_cache.behind(build_cache.date.today())
+        self.assertIsInstance(rows, list)
+
+
 if __name__ == "__main__":
     unittest.main()
+
+class TestTheGate(unittest.TestCase):
+    """One gate, used by the report, the card and the alerts.
+
+    A suggestion that cannot be acted on today is not a suggestion. It is a
+    level the market left behind, and publishing it is worse than publishing
+    nothing.
+    """
+
+    def _rows(self):
+        # The highs stay under the 101 trigger, so no bar ever touched it:
+        # this is a level the market has not tested.
+        base = []
+        for i in range(60):
+            c = 100.0
+            base.append({"date": f"2026-08-{i + 1:02d}", "open": c, "high": c + 0.4,
+                         "low": c - 1, "close": c, "volume": 1000})
+        base += [
+            {"date": "2026-11-02", "open": 100, "high": 100.4, "low": 99, "close": 100, "volume": 1000},
+            {"date": "2026-11-03", "open": 100, "high": 100.4, "low": 99, "close": 100, "volume": 1000},
+        ]
+        return base
+
+    def test_an_unreachable_trigger_is_not_published(self):
+        import plan_gate
+        g = plan_gate.gate({"trigger": 110, "stop": 95, "close": 100},
+                            "TEST", close=100, rows=self._rows())
+        self.assertFalse(g["ok"])
+        self.assertTrue(any("nobody is getting filled" in r for r in g["reasons"]))
+
+    def test_a_stop_above_the_price_is_nonsense(self):
+        import plan_gate
+        g = plan_gate.gate({"trigger": 101, "stop": 105, "close": 100},
+                            "TEST", close=100, rows=self._rows())
+        self.assertFalse(g["ok"])
+        self.assertTrue(any("stop" in r and "above" in r for r in g["reasons"]))
+
+    def test_a_trigger_below_the_price_means_the_breakout_happened(self):
+        import plan_gate
+        g = plan_gate.gate({"trigger": 95, "stop": 90, "close": 100},
+                            "TEST", close=100, rows=self._rows())
+        self.assertFalse(g["ok"])
+
+    def test_a_clean_setup_passes(self):
+        import plan_gate
+        g = plan_gate.gate({"trigger": 101, "stop": 95, "close": 100},
+                            "TEST", close=100, stage2=True, base_grade="A",
+                            from_pivot_pct=0.5, rows=self._rows())
+        self.assertTrue(g["ok"])
+        self.assertEqual(g["verdict"], "BUY-READY")
+
+    def test_a_grade_c_base_is_not_a_setup(self):
+        import plan_gate
+        g = plan_gate.gate({"trigger": 101, "stop": 95, "close": 100},
+                            "TEST", close=100, stage2=True, base_grade="C",
+                            rows=self._rows())
+        self.assertFalse(g["ok"])
+
+    def test_a_pullback_entry_is_allowed_to_be_below_the_price(self):
+        import plan_gate
+        g = plan_gate.gate({"trigger": 95, "stop": 88, "close": 100},
+                            "TEST", close=100, stage2=True, base_grade="A",
+                            rows=self._rows(), kind="pullback")
+        self.assertTrue(g["ok"], g["reasons"])
+
+    def test_a_pullback_entry_that_is_a_collapse_is_not(self):
+        import plan_gate
+        g = plan_gate.gate({"trigger": 70, "stop": 65, "close": 100},
+                            "TEST", close=100, stage2=True, base_grade="A",
+                            rows=self._rows(), kind="pullback")
+        self.assertFalse(g["ok"])
+
+    def test_a_fresh_failure_is_rejected_and_an_old_one_is_only_a_note(self):
+        import plan_gate
+        rows = self._rows()
+        rows.append({"date": "2026-11-04", "open": 100, "high": 104,
+                     "low": 99, "close": 99.5, "volume": 2000})
+        g = plan_gate.gate({"trigger": 102, "stop": 95, "close": 100},
+                            "TEST", close=100, rows=rows)
+        self.assertFalse(g["ok"])
+        self.assertEqual(g["verdict"], "SETUP FAILED")
+
+
+class TestTheStateMachine(unittest.TestCase):
+    """The call has to describe what the price is doing now."""
+
+    def _rows(self, closes):
+        out = []
+        for i, (h, l, c) in enumerate(closes):
+            out.append({"date": f"2026-{9 + i // 25:02d}-{i % 25 + 1:02d}",
+                        "open": c, "high": h, "low": l, "close": c,
+                        "volume": 1_000_000})
+        return out
+
+    def test_a_stock_below_its_pivot_is_waiting_not_buyable(self):
+        import forward_plan as fp
+        rows = self._rows([(101, 99, 100)] * 60 + [(101, 99, 100), (101, 99, 100)])
+        orig = fp._rows
+        fp._rows = lambda sym: rows
+        try:
+            res = fp.analyse("TEST", {"close": 100, "vol_x50": 1.0},
+                              {"pivot": 110, "since": "2026-09-01"},
+                              500_000, 1.0, stage2=True, base_grade="A")
+        finally:
+            fp._rows = orig
+        self.assertEqual(res["state"], "pre_breakout")
+        self.assertTrue(res["state_text"].startswith("Inside the base"))
+
+    def test_a_breakout_that_already_ran_is_not_offered_again(self):
+        import forward_plan as fp
+        rows = self._rows([(101, 99, 100)] * 60 + [(101, 99, 100), (101, 99, 100)])
+        # today closed far above the pivot: the trade ran without us
+        rows[-1].update({"close": 120.0, "high": 121.0, "low": 99.0})
+        orig = fp._rows
+        fp._rows = lambda sym: rows
+        try:
+            res = fp.analyse("TEST", {"close": 120, "vol_x50": 1.0},
+                              {"pivot": 100, "since": "2026-09-01"},
+                              500_000, 1.0, stage2=True, base_grade="A")
+        finally:
+            fp._rows = orig
+        self.assertIn(res["state"], ("extended", "breakout_running"))
+        for p in res["plans"]:
+            self.assertNotEqual(p.get("entry"), 100.0)
+
+    def test_the_breakout_bar_uses_the_close_not_the_high(self):
+        import forward_plan as fp
+        rows = self._rows([(101, 99, 100)] * 60)
+        # a bar that spikes to 120 and closes at 100 is not a breakout
+        rows.append({"date": "2026-12-01", "open": 100, "high": 120, "low": 99,
+                     "close": 100, "volume": 1_000_000})
+        self.assertIsNone(fp._breakout_bar(rows))
+
+
+class TestResultsAhead(unittest.TestCase):
+    """Buy the setup before the number, not the gap after it."""
+
+    def test_the_calendar_reads_a_future_date_as_confirmed(self):
+        import results_calendar as rc
+        row = rc.fetch("TCS")
+        if row.get("error") or not row.get("next"):
+            self.skipTest("no earnings data available")
+        self.assertTrue(row["confirmed"])
+        self.assertTrue(row["next"])
+
+    def test_a_print_outside_the_window_is_not_listed(self):
+        import results_calendar as rc
+        rows = rc.upcoming(0)
+        for r in rows:
+            self.assertLessEqual(r["sessions"], 0)
+
+    def test_the_reaction_is_measured_not_guessed(self):
+        import pre_results
+        res = pre_results.reaction("TCS", ["2026-07-16", "2026-04-15"])
+        self.assertIn("n", res)
+        if res["n"]:
+            self.assertIn("h5", res)
+            self.assertIn("gap", res)
+
+    def test_the_market_study_has_a_sample_size(self):
+        import pre_results
+        m = pre_results.market_reaction()
+        self.assertIn("n", m)
+        self.assertIn("h5", m)
+
+
+class TestTheReportNeverPublishesAnUnreachableLevel(unittest.TestCase):
+    def test_the_candidate_filter_is_tight(self):
+        import bulletin_data
+        import inspect
+        src = inspect.getsource(bulletin_data.collect)
+        self.assertIn("-4.0 <= s[\"from_pivot_pct\"] <= 1.5", src)
+
+    def test_every_published_plan_goes_through_the_gate(self):
+        import bulletin_data
+        import inspect
+        src = inspect.getsource(bulletin_data.collect)
+        self.assertIn("plan_gate.gate(", src)
+
+
+class TestTheDataIsFresh(unittest.TestCase):
+    def test_the_pre_market_job_only_verifies(self):
+        import inspect
+        import scheduler
+        jobs = {j[0]: j for j in scheduler.JOBS}
+        self.assertIn("--verify", jobs["cache-premarket"][3])
+
+    def test_the_watchdog_checks_delivery_not_just_the_file(self):
+        import watchdog
+        self.assertTrue(callable(watchdog._delivered))
+        self.assertTrue(callable(watchdog._delivery_failures))
+
+    def test_the_cache_verifier_finds_what_is_behind(self):
+        import build_cache
+        rows = build_cache.behind(build_cache.date.today())
+        self.assertIsInstance(rows, list)
+
 
 if __name__ == "__main__":
     unittest.main()

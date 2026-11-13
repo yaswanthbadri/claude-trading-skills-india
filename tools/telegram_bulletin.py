@@ -173,9 +173,18 @@ def msg_overview(d: dict) -> str:
         closed_note = ("\n⚠️ <i>Exchange closed today — prices are from the last session."
                        + (f" Next session: {esc(nxt)}." if nxt else "")
                        + "</i>")
+    # Every card carries the date of the prices it is talking about. A
+    # report without that stamp is a report you cannot trust on Monday.
+    uni = d.get("universe") or {}
+    as_of = uni.get("last_bar")
+    fresh_note = ""
+    if as_of:
+        fresh_note = f" · prices as of {esc(as_of)}"
+        if uni.get("stale"):
+            fresh_note += " ⚠️ stale"
     return (
         f"📊 <b>{heading} — India</b>\n"
-        f"<i>{esc(stamp)} IST</i>{closed_note}\n"
+        f"<i>{esc(stamp)} IST{fresh_note}</i>{closed_note}\n"
         f"───────────────\n"
         f"<b>NIFTY 50</b>  {n(idx['close'])}  ({pct(idx['change_pct'])})\n"
         f"<b>India VIX</b>  {n(vix)}  · {vix_tag}\n"
@@ -294,6 +303,46 @@ def msg_headlines(d: dict) -> str:
     for h in hs[:6]:
         out.append(f"• <a href=\"{esc(h['url'])}\">{esc(h['title'])}</a>")
     out += ["", "<i>Educational analysis only — not SEBI-registered advice.</i>"]
+    return "\n".join(out)
+
+
+def msg_results(d: dict) -> str:
+    """The results ahead: who reports, and whether the chart is ready."""
+    ra = d.get("results_ahead") or {}
+    rows = ra.get("rows") or []
+    if not rows:
+        return ""
+    out = ["📅 <b>Results ahead</b>",
+           f"<i>{len(rows)} print(s) inside the next {ra.get('window', 7)} "
+           "sessions.</i>", ""]
+    for r in rows[:6]:
+        s2 = r.get("setup") or {}
+        tag = "confirmed" if r.get("confirmed") else "estimated"
+        line = (f"<b>{esc(r['symbol'])}</b> — {esc(r['date'])} "
+                f"({r['sessions']} session(s), {tag})")
+        if s2:
+            chart = "Stage 2 ✓" if s2.get("stage2") else "not Stage 2"
+            chart += f" · {esc(s2.get('base_type') or 'no base')} grade {esc(s2.get('base_grade') or '?')}"
+            if s2.get("pivot") is not None:
+                chart += (f" · pivot {n(s2['pivot'])} "
+                          f"({pct(s2.get('from_pivot_pct'))} away)")
+            line += f"\n<i>{esc(chart)}</i>"
+        react = r.get("reaction") or {}
+        if react.get("n"):
+            g = (react.get("gap") or {}).get("median", 0)
+            h5 = (react.get("h5") or {}).get("median", 0)
+            line += (f"\n<i>its last {react['n']} print(s): median gap "
+                     f"{g:+.1f}%, 5 sessions {h5:+.1f}%</i>")
+        out.append(line)
+    mkt = ra.get("market") or {}
+    if (mkt.get("h5") or {}).get("n"):
+        h5 = mkt["h5"]
+        g = (mkt.get("gap") or {}).get("median", 0)
+        out.append("")
+        out.append(f"<i>Across {mkt['n']:,} prints: median gap {g:+.1f}%, "
+                   f"5 sessions later {h5.get('median', 0):+.1f}% "
+                   f"(positive {h5.get('hit', 0):.0f}%). A stop does not protect "
+                   "you through the gap — size for it.</i>")
     return "\n".join(out)
 
 
@@ -450,6 +499,10 @@ def build_messages(d: dict, docs: bool = True) -> list[str]:
 
     for p in plans[:3]:
         msgs.append(_safe(msg_plan, p) or _plan_fallback(p))
+
+    res_msg = _safe(msg_results, d)
+    if res_msg:
+        msgs.append(res_msg)
 
     deep_msg = _safe(msg_deep, d)
     if deep_msg:

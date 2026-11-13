@@ -34,6 +34,8 @@ REPO = Path(__file__).resolve().parents[1]
 CACHE = REPO / "data" / "results_dates.json"
 MAX_AGE_HOURS = 20
 MAX_FETCH = 14           # per run: keeps a cold cache from stalling the report
+GAP_PCT = 3.5            # a gap this big is usually a reaction to something
+MIN_GAP_SAMPLES = 3      # below this there is no cadence to learn
 HISTORY_DAYS = 200       # older than this and the cadence is not a cadence
 DEFAULT_GAP_DAYS = 91
 
@@ -139,6 +141,90 @@ def fetch(symbol: str, today: date) -> dict:
     known_last = max([x for x in cal_dates if x < today], default=None)
     d, source = _from_history(tk, today, known_last=known_last)
     return {"date": d.isoformat() if d else None, "source": source}
+
+
+# ---------------------------------------------------------------------------
+# the offline estimator
+# ---------------------------------------------------------------------------
+def _gap_days(rows: list[dict], today: date) -> list[date]:
+    """Days that opened far away from the previous close.
+
+    A results print moves a stock several percent overnight. Over three years
+    of daily bars, those gaps fall into a quarterly rhythm, and the rhythm is
+    the estimate. It is not as good as a confirmed date and it is not the only
+    cause of a gap — but it needs no network, which means it works for 2,400
+    names instead of the fourteen a live lookup can afford.
+    """
+    out = []
+    for i in range(1, len(rows)):
+        prev = rows[i - 1]["close"]
+        if not prev:
+            continue
+        gap = (rows[i]["open"] - prev) / prev * 100
+        if abs(gap) >= GAP_PCT:
+            try:
+                d = date.fromisoformat(rows[i]["date"][:10])
+            except ValueError:
+                continue
+            if d <= today:
+                out.append(d)
+    return out
+
+
+def estimate_offline(symbol: str, today: date | None = None) -> dict:
+    """The next likely results date, learned from the stock's own gaps.
+
+    A results print moves a stock several percent overnight. Over three years
+    of daily bars those gaps fall into a quarterly rhythm, and the rhythm is
+    the estimate.
+
+    The gaps are not only results — a block deal, an index rebalance or a
+    regulatory order gaps too — so the days are chained backwards at roughly
+    quarterly intervals rather than simply taking the median gap between
+    them. What survives is the quarterly skeleton; the noise drops out.
+    """
+    today = today or date.today()
+    try:
+        import tech_detail
+        rows = tech_detail.load_candles(symbol)
+    except Exception:
+        return {"date": None, "source": "unknown", "samples": 0}
+    if len(rows) < 250:
+        return {"date": None, "source": "unknown", "samples": 0}
+
+    days = _gap_days(rows, today)
+    if len(days) < MIN_GAP_SAMPLES:
+        return {"date": None, "source": "unknown", "samples": len(days)}
+
+    # Chain backwards: from each anchor, the most recent earlier gap that is
+    # one quarter away. Anything closer is noise, anything further is a
+    # missed print.
+    chain = []
+    anchor = days[-1]
+    remaining = list(days[:-1])
+    while remaining and len(chain) < 12:
+        cand = None
+        for d in reversed(remaining):
+            delta = (anchor - d).days
+            if 55 <= delta <= 130:
+                cand = d
+                break
+        if cand is None:
+            break
+        chain.append(cand)
+        remaining = [d for d in remaining if d < cand]
+        anchor = cand
+    if len(chain) < MIN_GAP_SAMPLES - 1:
+        return {"date": None, "source": "unknown", "samples": len(days)}
+
+    diffs = [(chain[0] - c).days for c in chain[1:]]
+    gap = int(statistics.median(diffs))
+    nxt = days[-1] + timedelta(days=gap)
+    while nxt < today:
+        nxt += timedelta(days=gap)
+    return {"date": nxt.isoformat(), "source": "estimated",
+            "samples": len(days), "cadence_days": gap,
+            "last_gap": days[-1].isoformat()}
 
 
 # ---------------------------------------------------------------------------

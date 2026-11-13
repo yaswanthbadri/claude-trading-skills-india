@@ -77,6 +77,50 @@ def _reports_today(mode: str) -> list[Path]:
     return sorted(REPORTS.glob(f"bulletin_{mode}_{day}_*.json"))
 
 
+def _delivered(mode: str) -> bool:
+    """Was today's report actually sent to the subscribers?
+
+    A report file on disk is not a delivery. The build can finish and the
+    Telegram call can fail — a timeout, a rate limit, a blocked chat — and
+    the file will still be sitting there looking perfectly fine. This reads
+    the delivery log, because that is the only record of what the reader
+    actually received.
+    """
+    day = date.today().isoformat()
+    log = LOGS / "telegram.log"
+    if not log.exists():
+        return False
+    try:
+        tail = log.read_text(errors="ignore")[-200_000:]
+    except Exception:
+        return False
+    for line in tail.splitlines():
+        if f"Sent bulletin_{mode}_{day}_" not in line:
+            continue
+        # "to 2/2 chat(s)" is a delivery. "to 1/2 chat(s); failed [...]" is a
+        # partial delivery, which is still a delivery for the others.
+        if "chat(s)" in line:
+            return True
+    return False
+
+
+def _delivery_failures(mode: str) -> list[str]:
+    """Chat ids that did not get today's report."""
+    day = date.today().isoformat()
+    log = LOGS / "telegram.log"
+    out = []
+    if not log.exists():
+        return out
+    try:
+        tail = log.read_text(errors="ignore")[-200_000:]
+    except Exception:
+        return out
+    for line in tail.splitlines():
+        if f"Sent bulletin_{mode}_{day}_" in line and "failed" in line:
+            out.append(line.strip()[:300])
+    return out
+
+
 def _cache_last_bar() -> str | None:
     p = DATA / "nifty.csv"
     if not p.exists():
@@ -138,9 +182,12 @@ def main() -> int:
     actions = []
 
     if trading:
-        if now.hour * 60 + now.minute >= 9 * 60 + 30 and not _reports_today("daily"):
+        # A report that was built but never delivered is still missing.
+        daily_files = _reports_today("daily")
+        daily_sent = _delivered("daily")
+        if now.hour * 60 + now.minute >= 9 * 60 + 30 and (not daily_files or not daily_sent):
             if now.hour * 60 + now.minute <= 13 * 60:
-                actions.append(("daily", "morning plan missing"))
+                actions.append(("daily", "morning plan missing or undelivered"))
             else:
                 _log("gap: no morning plan today and it is too late to publish one")
                 _tell("⚠️ <b>No morning plan today</b>\n"
@@ -149,15 +196,29 @@ def main() -> int:
                       "was sent. Yesterday's plan is the last valid one.",
                       dry=args.dry_run)
 
-        if now.hour * 60 + now.minute >= 16 * 60 + 10 and not _reports_today("eod"):
+        eod_files = _reports_today("eod")
+        eod_sent = _delivered("eod")
+        if now.hour * 60 + now.minute >= 16 * 60 + 10 and (not eod_files or not eod_sent):
             if now.hour * 60 + now.minute <= 19 * 60:
-                actions.append(("eod", "closing review missing"))
+                actions.append(("eod", "closing review missing or undelivered"))
             else:
                 _log("gap: no closing review today and it is too late to publish one")
                 _tell("⚠️ <b>No closing review today</b>\n"
                       "The 16:00 run never happened. The scorecard will catch up "
                       "on the next session; no verdicts were invented.",
                       dry=args.dry_run)
+
+    # A delivery that failed is worth knowing about even when the report
+    # itself was fine: somebody did not get it.
+    for mode in ("daily", "eod"):
+        if now.hour * 60 + now.minute < 16 * 60 + 10:
+            break
+        for line in _delivery_failures(mode):
+            _log(f"delivery problem: {line}")
+            _tell(f"⚠️ <b>Delivery problem</b>\n{line}\n"
+                  "<i>The report was built but a chat did not receive it. "
+                  "Send /report to resend the latest one.</i>",
+                  dry=args.dry_run)
 
     expected = cal.last_session_bar(now=now).isoformat()
     last = _cache_last_bar()

@@ -73,6 +73,29 @@ def is_pre_market(now: datetime | None = None) -> bool:
     return PRE_OPEN_START <= now.time() < MARKET_OPEN
 
 
+def trading_days_between(start: date, end: date) -> int | None:
+    """Sessions from `start` until the print can be traded, holidays included.
+
+    A company that says "14 November" on a Saturday means the number lands on
+    the next session, so the count runs to the effective date and the end
+    date itself is included when it is a trading day.
+
+    None when the date is in the past — there is no session count for a print
+    that has already happened.
+    """
+    if end < start:
+        return None
+    # The effective date: the stated date if it trades, otherwise the next
+    # session it can actually be traded on.
+    eff = end if is_trading_day(end) else next_trading_day(end)
+    n, d = 0, start
+    while d < eff:
+        d += timedelta(days=1)
+        if is_trading_day(d):
+            n += 1
+    return n
+
+
 def next_trading_day(d: date | None = None) -> date:
     d = (d or date.today()) + timedelta(days=1)
     for _ in range(15):

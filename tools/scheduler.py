@@ -55,7 +55,9 @@ IST = ZoneInfo("Asia/Kolkata")
 
 # job name, HH:MM, script, args, allday (runs on holidays too), catch-up minutes
 JOBS = [
-    ("cache-premarket", "08:50", "build_cache.py", [], False, 20),
+    # Verify only: the cache already has yesterday's close, and a full
+    # download at 08:50 competes with the 09:00 plan for the network.
+    ("cache-premarket", "08:50", "build_cache.py", ["--verify"], False, 20),
     ("daily", "09:00", "daily_bulletin.py", ["--mode", "daily"], False, 90),
     ("cache-open", "09:10", "build_cache.py", [], False, 10),
 ] + [
@@ -72,6 +74,10 @@ JOBS = [
     ("cache-close", "15:40", "build_cache.py", [], False, 30),
     ("eod", "16:00", "daily_bulletin.py", ["--mode", "eod"], False, 180),
     ("cache-night", "19:30", "build_cache.py", [], False, 240),
+    # The results calendar: who reports, and when. It needs Yahoo's earnings
+    # history, which is slow — so it runs after the close, when nothing is
+    # waiting on it.
+    ("results-calendar", "19:35", "results_calendar.py", ["--build"], False, 600),
     # Every day: the track record and the subscriber list are the only state
     # that cannot be rebuilt, and people join on weekends.
     ("backup", "19:45", "backup.py", [], True, 180),

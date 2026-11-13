@@ -23,7 +23,7 @@ import json
 import sys
 import time
 import warnings
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -136,13 +136,32 @@ def _download(chunk: list[dict], years: int, full: bool):
     return out
 
 
+def behind(expected: date) -> list[dict]:
+    """Symbols whose cache does not have the expected bar.
+
+    The pre-market job used to re-download all 2,400 names, which took sixteen
+    minutes when Yahoo was slow, and it ran at the same time as the 09:00
+    plan. The plan then waited on the same throttled network and arrived after
+    the open. Before the open the only thing that matters is whether the
+    cache already has yesterday's close — and it does, because the 15:40 and
+    19:30 jobs put it there.
+    """
+    import universe
+    out = []
+    for r in universe.load():
+        ld = _last_date(CANDLES / f"{r['symbol']}.csv")
+        if ld is None or ld < expected:
+            out.append(r)
+    return out
+
+
 def update(years: int = 3, full: bool = False, limit: int | None = None,
-           sleep: float = 0.25) -> dict:
+           sleep: float = 0.25, only: list[dict] | None = None) -> dict:
     warnings.filterwarnings("ignore")
     import universe
 
     CANDLES.mkdir(parents=True, exist_ok=True)
-    rows = universe.load()
+    rows = only if only is not None else universe.load()
     if limit:
         rows = rows[:limit]
 
@@ -233,11 +252,50 @@ def main() -> int:
     ap.add_argument("--years", type=int, default=3)
     ap.add_argument("--full", action="store_true", help="rebuild from scratch")
     ap.add_argument("--limit", type=int, default=None)
+    ap.add_argument("--verify", action="store_true",
+                    help="fetch only the symbols that are behind the last session")
+    ap.add_argument("--check", action="store_true",
+                    help="report freshness and exit without downloading")
     args = ap.parse_args()
 
     if args.full and CANDLES.exists():
         for f in CANDLES.glob("*.csv"):
             f.unlink()
+
+    expected = None
+    try:
+        import market_calendar as cal
+        expected = cal.last_session_bar().isoformat()
+    except Exception:
+        expected = (datetime.now().date() - timedelta(days=1)).isoformat()
+
+    if args.check:
+        import universe
+        files = list(CANDLES.glob("*.csv"))
+        latest = 0
+        behind_n = 0
+        for r in universe.load():
+            ld = _last_date(CANDLES / f"{r['symbol']}.csv")
+            if ld is None:
+                continue
+            if ld.isoformat() == expected:
+                latest += 1
+            elif ld.isoformat() < expected:
+                behind_n += 1
+        print(f"cache: {len(files):,} files · expected bar {expected} · "
+              f"{latest:,} current · {behind_n:,} behind")
+        return 0
+
+    if args.verify:
+        rows = behind(date.fromisoformat(expected))
+        print(f"verify: expected bar {expected} · {len(rows):,} symbol(s) behind")
+        if not rows:
+            print("cache: nothing to fetch — the pre-market data is already there")
+            return 0
+        r = update(years=args.years, only=rows)
+        print(f"cache: {r['written']} updated, {r['up_to_date']} already current, "
+              f"{r['skipped']} no-data, {r['failed']} failed, {r['seconds']}s")
+        return 0
 
     r = update(years=args.years, full=args.full, limit=args.limit)
     print(f"\ncache: {r['written']} updated, {r['up_to_date']} already current, "

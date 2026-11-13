@@ -150,11 +150,24 @@ def build_plists() -> dict[str, str]:
         + FOOTER
     )
 
-    # Candle cache: 08:50 before the morning plan, hourly at :00 so the :15
-    # bulletin scans today's bars, 15:40 once the close is in (the 16:00 review
-    # needs the full session), and 19:30 as a backstop.
-    cache_entries = ([{"Weekday": d, "Hour": 8, "Minute": 50} for d in WEEKDAYS]
-                     + [{"Weekday": d, "Hour": 9, "Minute": 10} for d in WEEKDAYS]
+    # The pre-market check does NOT re-download the world. At 08:50 the cache
+    # already has yesterday's close — the 15:40 and 19:30 jobs put it there —
+    # so it only checks, and fetches the handful of symbols that are behind.
+    # The full download used to take sixteen minutes when Yahoo was slow, and
+    # it ran at the same time as the 09:00 plan, which then arrived after the
+    # open.
+    plists["com.tradingskills.cache-verify"] = (
+        _base("com.tradingskills.cache-verify", "build_cache.py", ["--verify"])
+        + _calendar([{"Weekday": d, "Hour": 8, "Minute": 50} for d in WEEKDAYS])
+        + f"  <key>StandardOutPath</key>\n  <string>{LOGS / 'cache.log'}</string>\n"
+        + f"  <key>StandardErrorPath</key>\n  <string>{LOGS / 'cache.log'}</string>\n"
+        + FOOTER
+    )
+
+    # Candle cache: hourly at :00 so the :15 bulletin scans today's bars,
+    # 15:40 once the close is in (the 16:00 review needs the full session),
+    # and 19:30 as a backstop.
+    cache_entries = ([{"Weekday": d, "Hour": 9, "Minute": 10} for d in WEEKDAYS]
                      + [{"Weekday": d, "Hour": h, "Minute": 0} for d in WEEKDAYS
                         for h in range(10, 16)]
                      + [{"Weekday": d, "Hour": 15, "Minute": 40} for d in WEEKDAYS]

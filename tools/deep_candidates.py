@@ -200,21 +200,27 @@ def _doubling_study(df):
 # history fetch
 # ---------------------------------------------------------------------------
 def _history(symbols: list[str], period: str = HISTORY_PERIOD):
-    """One bulk download; returns {symbol: DataFrame} with yfinance columns."""
-    import warnings
-    import yfinance as yf
+    """History for the doubling study.
 
-    warnings.filterwarnings("ignore")
-    tickers = [f"{s}.NS" for s in symbols]
-    df = yf.download(tickers, period=period, interval="1d",
-                     progress=False, auto_adjust=False, threads=True, group_by="ticker")
+    Read it from the local cache, not from Yahoo. The cache already has ten
+    years of daily bars for every symbol, it is the same data the rest of the
+    report uses, and it costs no network calls — which matters at 09:00, when
+    Yahoo is throttling and every request is a chance to arrive after the
+    open.
+    """
     out = {}
-    for s, t in zip(symbols, tickers):
+    try:
+        import tech_detail
+    except Exception:
+        return out
+    for sym in symbols:
         try:
-            sub = df[t] if len(symbols) > 1 else df
-            sub = sub[["Open", "High", "Low", "Close", "Volume"]].dropna()
-            if len(sub) > 120:
-                out[s] = sub
+            rows = tech_detail.load_candles(sym)
+            if len(rows) < 120:
+                continue
+            import pandas as pd
+            df = pd.DataFrame(rows)[["Date", "Open", "High", "Low", "Close", "Volume"]]
+            out[sym] = df
         except Exception:
             continue
     return out

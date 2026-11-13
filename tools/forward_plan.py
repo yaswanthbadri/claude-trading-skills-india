@@ -50,6 +50,7 @@ def _sibling(skill: str, script: str):
 risk = _sibling("position-sizing", "risk")
 
 MAX_STOP_PCT = 8.0          # a stop further than this is not a stop
+MAX_PIVOT_GAP_PCT = 1.5     # below the pivot by more than this: not a setup
 CHASE_PCT = 3.0             # the most you pay over the pivot
 HANDLE_MAX_RANGE_PCT = 15.0  # a handle deeper than this is not a handle
 HANDLE_MIN_BARS = 5
@@ -62,17 +63,73 @@ def _rows(symbol: str) -> list[dict]:
 
 
 def find_handle(rows: list[dict], close: float) -> dict | None:
-    """The most recent tight shelf the market has been holding.
+    """The shelf the market has been holding, and the level it broke.
 
-    Windows ending yesterday, from 4 to 20 bars. The widest one whose depth
-    is still shallow is the handle; its high is the pivot the stock has just
-    cleared and its low is where the shelf failed.
+    Two ways to find it, in order of usefulness:
+
+    1. The breakout bar tells you where the shelf was. Find the last bar that
+       closed above the prior 20-day range high on real volume, then look at
+       the tight run of bars right before it. That is the base the stock
+       actually broke out of, not the one it broke out of three months ago.
+
+    2. If nothing has broken out, the shelf is the tightest run of bars the
+       market is holding right now, and its high is the level to buy above.
+
+    The depth cap matters: without it the "shelf" becomes the breakout bar
+    itself, and the level to buy becomes yesterday's high.
     """
-    if len(rows) < HANDLE_MIN_BARS + 5:
+    if len(rows) < HANDLE_MIN_BARS + 25:
         return None
+
+    # ---- 1. the breakout bar, and the shelf in front of it -----------------
+    bo = _breakout_bar(rows)
+    if bo is not None:
+        shelf = _tight_window(rows[:bo], HANDLE_MIN_BARS, HANDLE_MAX_BARS)
+        if shelf:
+            shelf["breakout_date"] = rows[bo]["date"]
+            shelf["breakout_close"] = rows[bo]["close"]
+            shelf["breakout_high"] = rows[bo]["high"]
+            shelf["breakout_vol_x"] = _vol_x(rows, bo)
+            return shelf
+
+    # ---- 2. no breakout: the shelf being held right now --------------------
+    shelf = _tight_window(rows[:-1], HANDLE_MIN_BARS, HANDLE_MAX_BARS)
+    if shelf:
+        shelf["breakout_date"] = None
+    return shelf
+
+
+def _vol_x(rows: list[dict], i: int) -> float | None:
+    if i < 50:
+        return None
+    avg = sum(r["volume"] for r in rows[i - 50:i]) / 50
+    return (rows[i]["volume"] / avg) if avg else None
+
+
+def _breakout_bar(rows: list[dict], lookback: int = 30) -> int | None:
+    """The last bar that CLOSED above the prior 20-day range high.
+
+    The close, not the high. A stock that spikes intraday and gives it back
+    has not broken out, and treating its high as the level to buy is how the
+    "shelf" ends up being yesterday's spike.
+    """
+    for i in range(len(rows) - 1, max(20, len(rows) - lookback) - 1, -1):
+        prior_hi = max(r["high"] for r in rows[i - 20:i])
+        if rows[i]["close"] > prior_hi:
+            # Volume decides whether the breakout is *good*, not whether it
+            # happened. A breakout on light volume is still the structure the
+            # market is working from.
+            vx = _vol_x(rows, i)
+            if vx is None or vx >= 0.8:
+                return i
+    return None
+
+
+def _tight_window(rows: list[dict], min_bars: int, max_bars: int) -> dict | None:
+    """The tightest shelf nearest the price: the one with the highest low."""
     best = None
-    end = len(rows) - 1                      # yesterday is the last full bar
-    for w in range(HANDLE_MIN_BARS, HANDLE_MAX_BARS + 1):
+    end = len(rows)
+    for w in range(min_bars, max_bars + 1):
         if end - w < 0:
             break
         window = rows[end - w:end]
@@ -83,10 +140,6 @@ def find_handle(rows: list[dict], close: float) -> dict | None:
         depth = (hi - lo) / hi * 100
         if depth > HANDLE_MAX_RANGE_PCT:
             continue
-        # a pivot the price has already left far behind is not this stock's
-        # pivot any more
-        if close and (hi / close - 1) * 100 > 25:
-            continue
         cand = {"pivot": hi, "low": lo, "bars": w, "depth_pct": round(depth, 1),
                 "start": window[0]["date"], "end": window[-1]["date"]}
         # The tightest shelf nearest the price: a stop belongs under the most
@@ -94,6 +147,22 @@ def find_handle(rows: list[dict], close: float) -> dict | None:
         if best is None or lo > best["low"] or (lo == best["low"] and w > best["bars"]):
             best = cand
     return best
+
+
+def _cleared_days_ago(rows: list[dict], pivot: float, since: str) -> int | None:
+    """Sessions since the price first closed above this level.
+
+    The FIRST close above it is the breakout day. The most recent one just
+    tells you it is still above, which the caller already knows.
+    """
+    if not pivot:
+        return None
+    for i, r in enumerate(rows):
+        if r["date"] < since:
+            continue
+        if r["close"] > pivot:
+            return len(rows) - 1 - i
+    return None
 
 
 def _size(capital: float, risk_pct: float, entry: float, stop: float) -> dict:
@@ -193,7 +262,8 @@ def _from_classic(classic: dict, capital: float, risk_pct: float) -> dict:
 
 def analyse(symbol: str, detail: dict, base: dict | None = None,
             capital: float = 500_000.0, risk_pct: float = 1.0,
-            classic: dict | None = None) -> dict:
+            classic: dict | None = None, stage2: bool | None = None,
+            base_grade: str | None = None) -> dict:
     """The state of the stock and the trade that belongs to it."""
     rows = _rows(symbol)
     if len(rows) < 60:
@@ -217,89 +287,141 @@ def analyse(symbol: str, detail: dict, base: dict | None = None,
     state = "no_base"
     state_text = ""
 
-    # ---- a fresh handle and a volume breakout through it -------------------
-    breakout_today = False
-    if handle and close > handle["pivot"]:
-        if vol_x >= 1.5:
-            breakout_today = True
-        else:
-            why.append(f"Price cleared the {handle['bars']}-bar handle at "
-                       f"{handle['pivot']:.0f} but on only {vol_x:.1f}x volume — "
-                       "the breakout is not confirmed.")
+    # ---- the live pivot, and how long ago it was cleared ------------------
+    # A stock that broke out of a base in July and is now basing again has a
+    # new pivot. Using the July one is how a card ends up offering to buy a
+    # level the market left a month ago.
+    pivot = old_pivot
+    pivot_source = "the base"
+    cleared_age = None
+    shelf_breakout = bool(handle and handle.get("breakout_date"))
+    if shelf_breakout:
+        # The stock just broke out of this shelf: the shelf is the structure.
+        pivot = handle["pivot"]
+        pivot_source = f"a {handle['bars']}-bar shelf"
+        cleared_age = _cleared_days_ago(rows, handle["pivot"], handle["end"])
+    elif old_pivot:
+        cleared_age = _cleared_days_ago(rows, old_pivot, base.get("since") or "")
 
-    if breakout_today and handle:
-        state = "breakout_today"
-        state_text = (f"Breakout today above a {handle['bars']}-bar handle "
-                      f"({handle['pivot']:.2f}), on {vol_x:.1f}x volume")
-        why.append(f"The shelf ran {handle['start']} to {handle['end']} between "
-                   f"{handle['low']:.0f} and {handle['pivot']:.0f} "
-                   f"({handle['depth_pct']}% deep). Today's close {close:.2f} is "
-                   f"above it for the first time.")
-        # (A) the retest — buy the shelf, not the spike
-        retest_entry = handle["pivot"]
+    from_pivot = None
+    if close and pivot:
+        from_pivot = (close / pivot - 1) * 100
+
+    # ---- where the price is relative to the level that matters ------------
+    if handle and close < handle["low"]:
+        state = "failed"
+        state_text = (f"The base broke — {close:.2f} is under the "
+                      f"{handle['low']:.2f} low")
+        why.append(f"The base was holding between {handle['low']:.0f} and "
+                   f"{handle['pivot']:.0f}. It has fallen through the bottom of "
+                   "it, so the setup is dead. Wait for a new base to form "
+                   "rather than buy into a broken one.")
+    elif pivot and close > pivot:
+        if cleared_age is not None and cleared_age == 0 and vol_x >= 1.5:
+            state = "breakout_today"
+            state_text = (f"Breakout today above {pivot_source} ({pivot:.2f}), "
+                          f"on {vol_x:.1f}x volume")
+            why.append(f"The shelf ran {handle['start']} to {handle['end']} "
+                       f"between {handle['low']:.0f} and {handle['pivot']:.0f} "
+                       f"({handle['depth_pct']}% deep). Today's close {close:.2f} "
+                       "is above it for the first time.")
+        elif cleared_age is not None and cleared_age <= 8:
+            state = "breakout_running"
+            state_text = (f"Breakout {cleared_age} session(s) old, now "
+                          f"{(from_pivot or 0):.1f}% above {pivot_source} at "
+                          f"{pivot:.2f}")
+            why.append(f"It cleared {pivot:.2f} {cleared_age} session(s) ago "
+                       f"and is {(from_pivot or 0):.1f}% above it. "
+                       f"{pivot:.0f} is the level to buy on a pullback, not "
+                       "the price you are looking at now.")
+        else:
+            state = "extended"
+            state_text = (f"Extended — {(from_pivot or 0):.1f}% past the "
+                          f"{pivot:.2f} {pivot_source}, no new base")
+            why.append(f"The level at {pivot:.2f} was cleared long ago. "
+                       f"Buying at {pivot:.0f} today is not a plan; the level "
+                       "is behind the market.")
+            pull = _pullback_plan(rows, detail, capital, risk_pct)
+            if pull:
+                plans.append(pull)
+    else:
+        state = "pre_breakout"
+        state_text = (f"Inside the base, below its high ({pivot:.2f})"
+                      if pivot else "Inside the base")
+        if pivot:
+            why.append(f"The price is {abs(from_pivot or 0):.1f}% below the "
+                       f"{pivot:.2f} level. There is nothing to buy until it "
+                       "comes back to it.")
+        cp = _from_classic(classic or {}, capital, risk_pct)
+        if cp:
+            cp["note"] = ("Not a buy yet — the price is still below the "
+                          "pivot. The order goes in when it clears it.")
+            plans.append(cp)
+
+    # The retest is the trade for a breakout that has just happened, whether
+    # it happened today or a few sessions ago. Buy the shelf, not the spike.
+    if state in ("breakout_today", "breakout_running") and handle and pivot:
+        # Buy the level that was broken, not the level above it. A shelf high
+        # the market has already rejected is not an entry.
         retest = _plan(
-            "retest", retest_entry, handle["low"], capital, risk_pct,
+            "retest", pivot, handle["low"], capital, risk_pct,
             "Buy the retest (preferred)",
-            note=(f"Wait for a pullback into {handle['pivot']:.0f}–"
-                  f"{handle['pivot'] * 1.03:.0f}. The stop sits under the shelf "
-                  f"low {handle['low']:.0f}. Better risk than chasing."),
-            extra={"entry_zone": [round(handle["pivot"], 2),
-                                  round(handle["pivot"] * 1.03, 2)]})
+            note=(f"Wait for a pullback into {pivot:.0f}–"
+                  f"{pivot * 1.03:.0f}. The stop sits under the "
+                  f"shelf low {handle['low']:.0f}. Better risk than chasing."),
+            extra={"entry_zone": [round(pivot, 2),
+                                  round(pivot * 1.03, 2)]})
         if retest:
             plans.append(retest)
-        # (B) the continuation — only if it keeps running
-        cont_stop = max(last["low"], handle["pivot"] * 0.98)
+        cont_stop = max(last["low"], pivot * 0.98)
         cont = _plan(
             "continuation", last["high"], cont_stop, capital, risk_pct,
             "Buy above today's high (aggressive)",
             note=("Only if it keeps running. The stop is "
-                  f"{last['high'] - cont_stop:.0f} points away on a stock with a "
-                  f"{detail.get('avg_range_pct') or 0:.1f}% average daily range, so "
-                  "the R is poor."),
+                  f"{last['high'] - cont_stop:.0f} points away on a stock with "
+                  f"a {detail.get('avg_range_pct') or 0:.1f}% average daily "
+                  "range, so the R is poor."),
             extra={"entry_zone": [round(last["high"], 2),
                                   round(last["high"] * 1.03, 2)]})
         if cont:
             plans.append(cont)
 
-    # ---- already extended with no fresh base ------------------------------
-    if state == "no_base" and old_pivot and from_pivot is not None:
-        if from_pivot > CHASE_PCT:
-            state = "extended"
-            state_text = (f"Extended — {from_pivot:.1f}% past the {old_pivot:.2f} "
-                          "pivot, no new base")
-            why.append(f"The pivot at {old_pivot:.2f} was cleared long ago. "
-                       f"Buying at {old_pivot:.0f} today is not a plan; the level "
-                       "is behind the market.")
-            pull = _pullback_plan(rows, detail, capital, risk_pct)
-            if pull:
-                plans.append(pull)
-        elif from_pivot >= -15:
-            state = "at_pivot"
-            state_text = f"At the pivot ({old_pivot:.2f})"
-            cp = _from_classic(classic or {}, capital, risk_pct)
-            if cp:
-                plans.append(cp)
-            else:
-                why.append("No usable base here, so there is no level to buy "
-                           "above yet.")
-        else:
-            state = "pre_breakout"
-            state_text = f"Inside the base, below the pivot ({old_pivot:.2f})"
-            cp = _from_classic(classic or {}, capital, risk_pct)
-            if cp:
-                cp["note"] = ("Not a buy yet — the price is still below the pivot. "
-                              "The order goes in when it clears it.")
-                plans.append(cp)
+    # A reversal day: closed well off the high on heavy volume. The breakout
+    # may still be intact, but somebody sold into it.
+    rev = detail.get("reversal")
+    if rev and rev.get("flag"):
+        why.append(f"⚠️ {rev['text']}")
 
     if state == "no_base":
         state = "no_base"
         state_text = "No base to trade"
+
+    # Every plan goes through the one gate. A plan that cannot be acted on
+    # today keeps its numbers for the reader but is marked unpublishable, and
+    # the verdict says so.
+    try:
+        import plan_gate
+        for pl in plans:
+            g = plan_gate.gate(
+                {"trigger": pl.get("entry"), "limit": (pl.get("entry_zone") or [None, None])[1],
+                 "stop": pl.get("stop"), "close": close},
+                symbol, close=close, stage2=stage2, base_grade=base_grade,
+                from_pivot_pct=from_pivot, rows=rows, kind=pl.get("kind"))
+            pl["gate"] = g
+            pl["publish"] = g.get("ok")
+    except Exception:
+        for pl in plans:
+            pl.setdefault("gate", {"ok": True, "reasons": []})
+            pl.setdefault("publish", True)
 
     return {
         "state": state,
         "state_text": state_text,
         "handle": handle,
         "old_pivot": old_pivot,
+        "pivot": pivot,
+        "pivot_source": pivot_source,
+        "cleared_age": cleared_age,
         "from_pivot_pct": from_pivot,
         "vol_x50": vol_x,
         "plans": plans,

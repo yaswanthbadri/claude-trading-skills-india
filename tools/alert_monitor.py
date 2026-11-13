@@ -708,6 +708,82 @@ def scan_shocks(state: dict, dry: bool) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# results ahead
+# ---------------------------------------------------------------------------
+def scan_results(state: dict, dry: bool = False, within: int = 5) -> list[str]:
+    """Tell the desk which company reports next, and whether it is ready.
+
+    The alert goes out before the print, while there is still a decision to
+    make. After the number the only information left is the gap.
+    """
+    sent = []
+    try:
+        import pre_results
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] pre_results unavailable: {exc}", file=sys.stderr)
+        return sent
+
+    try:
+        rows = pre_results.scan(within=within, with_setup=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] results scan failed: {exc}", file=sys.stderr)
+        return sent
+
+    market = pre_results.market_reaction()
+    for r in rows:
+        sym = r["symbol"]
+        key = f"results:{sym}:{datetime.now().strftime('%Y-%m-%d')}"
+        if _cooled(state, key, 60 * 24):
+            continue
+        s2 = r.get("setup") or {}
+        ready = pre_results.ready(r)
+
+        # Only the ones with a chart worth trading get a message. A print
+        # from a stock in a downtrend is information, not an opportunity.
+        if not ready:
+            continue
+
+        body = [f"📅 <b>{esc(sym)}</b> reports "
+                f"{esc(r['date'])} — {r['sessions']} session(s) away, "
+                f"{'confirmed' if r.get('confirmed') else 'estimated'}", ""]
+        body.append(f"<i>Chart: Stage 2 ✓, {esc(s2.get('base_type') or '')} "
+                    f"grade {esc(s2.get('base_grade') or '?')}"
+                    + (f", pivot {s2['pivot']:,.2f} "
+                       f"({s2.get('from_pivot_pct') or 0:+.1f}% away)"
+                       if s2.get("pivot") else "") + "</i>")
+        react = r.get("reaction") or {}
+        if react.get("n"):
+            g = (react.get("gap") or {}).get("median", 0)
+            h5 = (react.get("h5") or {}).get("median", 0)
+            body.append(f"<i>Its last {react['n']} print(s): median overnight "
+                        f"gap {g:+.1f}%, five sessions later {h5:+.1f}%</i>")
+        if (market.get("h5") or {}).get("n"):
+            h5 = market["h5"]
+            g = (market.get("gap") or {}).get("median", 0)
+            body.append("")
+            body.append(f"<i>Across {market['n']:,} prints: median gap "
+                        f"{g:+.1f}%, five sessions later "
+                        f"{h5.get('median', 0):+.1f}% (positive "
+                        f"{h5.get('hit', 0):.0f}%). A stop does not protect "
+                        "you through the gap — the exchange is shut. Size this "
+                        "for a gap, not for a normal day.</i>")
+        body.append("")
+        body.append("<i>Buy the setup before the number, not the gap after "
+                    "it. Check the plan with /check " + sym + ". "
+                    "Educational only — not advice.</i>")
+        text = "\n".join(body)
+
+        if send_telegram(text, dry=dry, reply_markup=buttons.alert(sym)):
+            if not dry:
+                _audit(sym, "results ahead", f"reports {r['date']}",
+                       "results calendar", "")
+                _mark(state, key)
+            sent.append(sym)
+            print(f"  → {sym} reports in {r['sessions']} session(s)")
+    return sent
+
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 def main() -> int:
@@ -749,6 +825,10 @@ def main() -> int:
             sent += [f"watch:{w}" for w in watch_scan.scan(dry=dry)]
         except Exception as exc:  # noqa: BLE001
             print(f"[warn] watch scan failed: {exc}", file=sys.stderr)
+
+    # Results: the one alert that has to arrive before the event.
+    if not news_only:
+        sent += [f"results:{r}" for r in scan_results(state, dry=dry)]
 
     if not news_only and cal.is_market_open():
         sent += scan_shocks(state, dry)

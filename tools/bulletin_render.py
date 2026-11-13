@@ -781,6 +781,48 @@ def render_md(d: dict) -> str:
         a(f"{i}. {item}")
     a("")
 
+    ra = d.get("results_ahead") or {}
+    if ra.get("rows"):
+        h2("Results ahead — buy the setup, not the gap")
+        a("")
+        a(f"**{len(ra['rows'])} company(ies) report inside the next "
+          f"{ra.get('window', 7)} sessions.**")
+        a("")
+        a("| Company | Reports | Sessions | Confirmed | Chart | Its last prints |")
+        a("|---|---|---|---|---|---|")
+        for r in ra["rows"][:8]:
+            s2 = r.get("setup") or {}
+            chart = (("Stage 2 ✓" if s2.get("stage2") else "not Stage 2")
+                     + f", {s2.get('base_type') or 'no base'} grade "
+                     + f"{s2.get('base_grade') or '?'}")
+            if s2.get("pivot"):
+                chart += (f", pivot {s2['pivot']:,.2f} "
+                          f"({s2.get('from_pivot_pct') or 0:+.1f}% away)")
+            react = r.get("reaction") or {}
+            hist = ("—" if not react.get("n") else
+                    f"{react['n']} prints · median gap "
+                    f"{(react.get('gap') or {}).get('median', 0):+.1f}%, "
+                    f"5 sessions "
+                    f"{(react.get('h5') or {}).get('median', 0):+.1f}%")
+            a(f"| {r['symbol']} | {r['date']} | {r['sessions']} | "
+              f"{'yes' if r.get('confirmed') else 'estimated'} | {chart} | {hist} |")
+        a("")
+        mkt = ra.get("market") or {}
+        if (mkt.get("h5") or {}).get("n"):
+            g = mkt.get("gap") or {}
+            h5 = mkt["h5"]
+            a(f"**What prints do.** Across {mkt['n']:,} prints in this market the "
+              f"overnight gap has a median of {g.get('median', 0):+.1f}% and "
+              f"five sessions later the median move is {h5.get('median', 0):+.1f}%, "
+              f"positive {h5.get('hit', 0):.0f}% of the time. A stop order does "
+              "not protect you through the gap — the exchange is shut. A "
+              "results trade is a small bet on a big day, sized accordingly.")
+            a("")
+        if ra.get("ready"):
+            a("**Ready to trade:** " + ", ".join(r["symbol"] for r in ra["ready"]) +
+              " — chart, entry, stop and targets are in the trade plans above.")
+            a("")
+
     h2("Headlines")
     a("")
     for h in d["headlines"]:
@@ -905,11 +947,24 @@ def state_verdict(state: str, stage2: bool = False, base_grade: str | None = Non
     """
     plans = plans or []
 
+    # The gate has the final word. If the best plan cannot be acted on today,
+    # the call is not BUY-READY whatever the chart looks like.
+    if plans:
+        g = plans[0].get("gate") or {}
+        if g.get("ok") is False:
+            v = g.get("verdict") or "WATCH — not actionable today"
+            reasons = g.get("reasons") or []
+            if reasons:
+                v = f"{v} — {reasons[0]}"
+            return v, "warn"
+
     if state == "breakout_today":
         best = plans[0] if plans else {}
         if best.get("stop_quality") == "capped inside the base":
             return ("BREAKOUT — but the stop does not fit", "warn")
         return ("BREAKOUT TODAY — buy the retest, not the spike", "ok")
+    if state == "breakout_running":
+        return ("BREAKOUT RUNNING — hold it, or buy the retest", "ok")
     if state == "extended":
         if plans:
             return ("ALREADY RAN — no chase; wait for the pullback", "warn")
@@ -1470,6 +1525,45 @@ footer{
         _calls_html(a, d, h2)
 
     # --- Plans ---
+    ra = d.get("results_ahead") or {}
+    if ra.get("rows"):
+        h2("Results ahead")
+        a("<div class='card'>")
+        a("<p>Companies that report inside the next "
+          f"{ra.get('window', 7)} sessions. The point is to buy the setup "
+          "before the number, not to be told afterwards that the stock "
+          "moved.</p>")
+        a("<table><thead><tr><th>Company</th><th>Reports</th><th>Chart</th>"
+          "<th>Its last prints</th></tr></thead><tbody>")
+        for r in ra["rows"][:10]:
+            s2 = r.get("setup") or {}
+            chart = ("Stage 2 ✓" if s2.get("stage2") else "not Stage 2")
+            chart += f", {s2.get('base_type') or 'no base'} grade {s2.get('base_grade') or '?'}"
+            if s2.get("pivot"):
+                chart += (f"<br><span class='sub'>pivot {s2['pivot']:,.2f}, "
+                          f"{s2.get('from_pivot_pct') or 0:+.1f}% away</span>")
+            react = r.get("reaction") or {}
+            hist = "—" if not react.get("n") else (
+                f"{react['n']} prints<br><span class='sub'>median gap "
+                f"{(react.get('gap') or {}).get('median', 0):+.1f}%, 5 sessions "
+                f"{(react.get('h5') or {}).get('median', 0):+.1f}%</span>")
+            tag = "confirmed" if r.get("confirmed") else "estimated"
+            a(f"<tr><td><b>{_h.escape(r['symbol'])}</b><br>"
+              f"<span class='sub'>{r['sessions']} session(s), {tag}</span></td>"
+              f"<td>{_h.escape(r['date'])}</td><td>{_h.escape(chart)}</td>"
+              f"<td>{hist}</td></tr>")
+        a("</tbody></table>")
+        mkt = ra.get("market") or {}
+        if (mkt.get("h5") or {}).get("n"):
+            g = mkt.get("gap") or {}
+            h5 = mkt["h5"]
+            a(f"<div class='note'>What prints do: across {mkt['n']:,} prints the "
+              f"overnight gap has a median of {g.get('median', 0):+.1f}% and five "
+              f"sessions later the median move is {h5.get('median', 0):+.1f}%, "
+              f"positive {h5.get('hit', 0):.0f}% of the time. A stop order does "
+              "not protect you through the gap — the exchange is shut.</div>")
+        a("</div>")
+
     h2("Trade plans")
     _heat = heat_block(d)
     if _heat:

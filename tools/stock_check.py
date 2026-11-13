@@ -45,6 +45,8 @@ REPO = Path(__file__).resolve().parents[1]
 SK = REPO / "skills"
 PYTHON = sys.executable
 BREAKOUT = SK / "breakout-planner" / "scripts" / "breakout.py"
+CANDLES = REPO / "data" / "candles"
+BENCH = REPO / "data" / "nifty.csv"
 
 sys.path.insert(0, str(REPO / "tools"))
 
@@ -68,6 +70,21 @@ def _clean(symbol: str) -> str:
     return s.replace(" ", "")
 
 
+def _csv_args(sym: str) -> list[str] | None:
+    """Use the local cache when we have it.
+
+    Yahoo's adjusted series and the exchange's official close disagree by a
+    percent here and there, which moves the pivot, which moves the entry.
+    The report reads the cache; /check has to read the same file, or the two
+    disagree on the same stock on the same day. It is also one fewer network
+    call, and Yahoo has been rate-limiting us all week.
+    """
+    path = CANDLES / f"{sym}.csv"
+    if path.exists() and BENCH.exists():
+        return ["--csv", str(path), "--benchmark-csv", str(BENCH)]
+    return None
+
+
 def check(symbol: str, capital: float | None = None,
           risk_pct: float | None = None) -> dict:
     sym = _clean(symbol)
@@ -82,8 +99,13 @@ def check(symbol: str, capital: float | None = None,
         capital = capital if capital is not None else 500_000.0
         risk_pct = risk_pct if risk_pct is not None else 1.0
 
-    base = _run([PYTHON, str(BREAKOUT), "check", "--symbol", sym,
-                 "--benchmark", "NIFTY", "--json"])
+    csv_args = _csv_args(sym)
+    base = _run([PYTHON, str(BREAKOUT), "check",
+                 *(csv_args or ["--symbol", sym, "--benchmark", "NIFTY"]),
+                 "--json"])
+    if not base:
+        base = _run([PYTHON, str(BREAKOUT), "check", "--symbol", sym,
+                     "--benchmark", "NIFTY", "--json"])
     if not base:
         return {"error": f"no data for {sym} — check the NSE symbol"}
 
@@ -136,8 +158,9 @@ def check(symbol: str, capital: float | None = None,
     # ---- the classic breakout plan, for when the price is at the pivot ----
     classic = {}
     if has_base:
-        pr = _run([PYTHON, str(BREAKOUT), "plan", "--symbol", sym,
-                   "--benchmark", "NIFTY", "--capital", str(capital),
+        pr = _run([PYTHON, str(BREAKOUT), "plan",
+                   *(csv_args or ["--symbol", sym, "--benchmark", "NIFTY"]),
+                   "--capital", str(capital),
                    "--risk-pct", str(risk_pct), "--json"])
         classic = (pr.get("plan") or {})
 
@@ -145,8 +168,18 @@ def check(symbol: str, capital: float | None = None,
     fwd = {}
     try:
         import forward_plan
-        fwd = forward_plan.analyse(sym, tech, {"pivot": pivot}, capital,
-                                   risk_pct, classic=classic)
+        cons = b.get("contractions") or []
+        pivot_date = ""
+        if cons and cons[-1].get("high_date"):
+            pivot_date = str(cons[-1]["high_date"])[:10]
+        elif b.get("start_date"):
+            pivot_date = str(b.get("start_date"))[:10]
+        fwd = forward_plan.analyse(sym, tech,
+                                   {"pivot": pivot, "since": pivot_date},
+                                   capital,
+                                   risk_pct, classic=classic,
+                                   stage2=bool(tt.get("stage2")),
+                                   base_grade=b.get("grade") if has_base else None)
     except Exception:
         fwd = {}
 
@@ -362,7 +395,11 @@ def card_call(r: dict) -> str:
     if r.get("why"):
         L.append("")
 
-    plans = r.get("plans") or []
+    # A plan the gate rejected is not a suggestion. Printing its entry, stop
+    # and targets makes it look like an order, which is exactly how a level
+    # the market left three weeks ago ends up on someone's screen as a buy.
+    plans = [p for p in (r.get("plans") or []) if p.get("publish", True)]
+    blocked = [p for p in (r.get("plans") or []) if not p.get("publish", True)]
     if plans:
         p = plans[0]
         L.append(f"<b>{_esc(p['label'])}</b>")
@@ -380,7 +417,15 @@ def card_call(r: dict) -> str:
                 L.append(f"<i>{_esc(other['note'])}</i>")
     else:
         L.append("🚫 <b>No trade to take right now.</b>")
-        if r.get("base", {}).get("note"):
+        for p in blocked[:2]:
+            g = p.get("gate") or {}
+            for reason in (g.get("reasons") or [])[:2]:
+                L.append(f"• {_esc(reason)}")
+            if p.get("entry"):
+                L.append(f"<i>For the record, the level would have been "
+                         f"₹{_n(p['entry'])} — but a level you cannot buy is "
+                         "not a plan.</i>")
+        if not blocked and r.get("base", {}).get("note"):
             L.append(f"<i>{_esc(r['base']['note'])}</i>")
 
     held = r.get("held")
@@ -658,7 +703,8 @@ def html_report(r: dict) -> str:
 
     # --- the trade ---
     h2("The trade")
-    plans = r.get("plans") or []
+    plans = [p for p in (r.get("plans") or []) if p.get("publish", True)]
+    blocked = [p for p in (r.get("plans") or []) if not p.get("publish", True)]
     if plans:
         for p in plans:
             a("<div class='card'>")
@@ -687,7 +733,17 @@ def html_report(r: dict) -> str:
             a("</div>")
     else:
         a("<div class='card'><b>No trade to take right now.</b>")
-        if b.get("note"):
+        for p in blocked[:3]:
+            g = p.get("gate") or {}
+            a("<ul>")
+            for reason in (g.get("reasons") or [])[:3]:
+                a(f"<li>{_esc(reason)}</li>")
+            a("</ul>")
+            if p.get("entry"):
+                a(f"<div class='sub'>For the record, the level would have been "
+                  f"₹{_n(p['entry'])} — but a level you cannot buy is not a "
+                  "plan.</div>")
+        if not blocked and b.get("note"):
             a(f"<div class='sub'>{_esc(b['note'])}</div>")
         a("</div>")
 

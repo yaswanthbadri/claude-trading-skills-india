@@ -76,7 +76,30 @@ never the plan.
 high if it has no base, or the next 2% up if it is already through the obvious level. You get one
 message when it clears that level, once a day, addressed to you and nobody else.
 
-## 3. Base rates
+### The gate: nothing is published that cannot be bought
+
+Every suggestion — in the report, in `/check`, in an alert — goes through one
+gate (`tools/plan_gate.py`). A suggestion is published only if all of these
+hold:
+
+| Rule | Why |
+|---|---|
+| the trigger is at most 3% above the price | a level 10% higher is not filled, and the "risk" is fiction |
+| the trigger is not already below the price | the breakout happened; buying now is chasing |
+| the stop is below the price | a long stop above the market is nonsense |
+| Stage 2 and a grade A or B base | a grade C base in a downtrend is not a setup |
+| the price is within 1.5% of the pivot | beyond that it is chasing, not buying |
+| the trigger was not touched and failed in the last 5 sessions | that is a fresh failure, not a setup |
+
+A rejected plan is never printed as an order. The card says what is wrong
+instead: *"the trigger at 1,295.70 is 10.0% above the price — nobody is
+getting filled"*. A level you cannot buy is not a plan.
+
+An old failure is a warning, not a rejection: a level that failed three weeks
+ago and has been rebuilt since is published with *"this level failed before —
+a second attempt is a weaker setup, so size it down"*.
+
+### Base rates
 
 `/check` measures what followed the same situation before, over every name in
 the local cache: a +5% day on 1.5x volume in an uptrend, a close above the
@@ -91,7 +114,28 @@ relevant than the market's average.
 These are base rates, not forecasts. The market figure counts stock-days, not
 independent events, and the card says so.
 
-## 4. How a call is graded
+## 5. Results ahead — buy the setup, not the gap
+
+Being told "TCS reported and rose 6%" is worth nothing: the move has already
+happened. So the desk works the other way round.
+
+`tools/results_calendar.py` pulls Yahoo's earnings history for the liquid
+names — it carries the **next scheduled date** (confirmed, not inferred) and
+the surprise for every past print. `tools/pre_results.py` then says which
+companies report inside the next week, what the chart looks like now, and
+what the market has done after this stock's last few prints.
+
+The plan for a results trade is different from a breakout plan, and the card
+says so: **a stop order does not protect you through the gap**, because the
+exchange is shut. The number behind it is measured, not guessed — across
+~900 prints in this market the median overnight gap is +0.4% and the median
+five-session move is +0.3%, positive 53% of the time. That is not an edge.
+It is a small bet on a big day, sized accordingly, and the card says that.
+
+A results alert goes out **before** the print, only for names whose chart is
+ready, and once per day per name.
+
+## 6. How a call is graded
 
 The desk publishes, stores, and then replays. A plan is keyed on the session it is *for*, not the
 day it was published.
@@ -103,7 +147,7 @@ day it was published.
 - Only `daily` and `eod` runs record new plans; intraday grades the book and never rewrites it.
 - Net R is after Indian charges, not before.
 
-## 5. Where things live
+## 7. Where things live
 
 | File | Job |
 |---|---|
@@ -114,6 +158,9 @@ day it was published.
 | `tools/forward_plan.py` | what to do with a stock in its current state |
 | `tools/tech_detail.py` | RSI, ATR, ADX, moving averages, volume, extension |
 | `tools/base_rates.py` | what happened after the same setup, market-wide and per stock |
+| `tools/plan_gate.py` | the one gate every suggestion has to pass |
+| `tools/results_calendar.py` | who reports, when — confirmed dates and history |
+| `tools/pre_results.py` | the results playbook: the setup, the plan, the base rate |
 | `tools/alert_monitor.py` | news events, price shocks, watchlist pings |
 | `tools/levels_watch.py` | stop / T1 / T2 breaches on the open book |
 | `tools/recs.py` | the book: record, replay, scorecard, attribution |
@@ -129,7 +176,7 @@ day it was published.
 State lives in `data/` (gitignored): `recommendations.json`, `subscribers.json`, `candles/`,
 `breaks.json`, `tradability.json`, `delivery/`, `backups/`. Logs in `logs/`, reports in `reports/`.
 
-## 6. Settings
+## 8. Settings
 
 All optional, all in `.env` (see `.env.example`):
 
@@ -143,7 +190,7 @@ All optional, all in `.env` (see `.env.example`):
 | `TELEGRAM_BOT_TOKEN` | — | required |
 | `TELEGRAM_INVITE_CODE` | — | if set, `/start` needs it |
 
-## 7. Tests
+## 9. Tests
 
 ```bash
 /opt/homebrew/bin/python3 -m unittest discover -s tests -p 'test_desk*.py'

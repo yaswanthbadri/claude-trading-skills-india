@@ -435,11 +435,18 @@ def collect(capital: float | None = None, risk_pct: float | None = None,
         pass
 
     ordered = sorted(setups, key=rank_key)
+    # A candidate has to be AT its pivot, not anywhere near it. The old rule
+    # allowed anything from 12% below the pivot to infinity above it, which is
+    # how a stock that broke out three weeks ago got published as a setup.
     tradable = [s for s in ordered
-                if s["from_pivot_pct"] is not None and s["from_pivot_pct"] > -12
+                if s["from_pivot_pct"] is not None
+                and -4.0 <= s["from_pivot_pct"] <= 1.5
                 and (s["liquidity_cr"] or 0) >= MIN_TURNOVER_CR
                 and s["symbol"] not in held]
-    picks = _diversify(tradable, budget)
+    # Fetch more than the budget. The gate can reject the top name — a
+    # trigger that failed three weeks ago, a stop that does not fit — and
+    # there is no point publishing nothing when the fourth name is clean.
+    picks = _diversify(tradable, max(budget * 3, budget + 5))
 
     # ---- trade plans --------------------------------------------------------
     def _plan_cmd(sym: str) -> list[str]:
@@ -499,7 +506,10 @@ def collect(capital: float | None = None, risk_pct: float | None = None,
     # The date goes on the card so the gap risk is visible before the order.
     try:
         import results_dates as rd
-        cal = rd.annotate([p["symbol"] for p in plans])
+        # No network here. At 09:00 the report cannot afford to wait on
+        # Yahoo, and the offline estimator plus the calendar cache answer the
+        # same question.
+        cal = rd.annotate([p["symbol"] for p in plans], network=False)
         for p in plans:
             row = cal.get(p["symbol"]) or {}
             p["results_date"] = row.get("date")
@@ -548,6 +558,36 @@ def collect(capital: float | None = None, risk_pct: float | None = None,
         data["gate"] = {"blocked": gate.get("blocked") or {},
                         "flagged": gate.get("flagged") or {}}
 
+    # ---- the one gate ------------------------------------------------------
+    # Every suggestion that leaves this desk goes through it. A plan that
+    # cannot be acted on today is not a suggestion: it is a level the market
+    # left behind, and publishing it is worse than publishing nothing.
+    data["rejected"] = []
+    if plans:
+        import plan_gate
+        keep = []
+        for p in plans:
+            g = plan_gate.gate(
+                {"trigger": p.get("trigger"), "limit": p.get("limit"),
+                 "stop": p.get("stop"), "close": p.get("close")},
+                p["symbol"], close=p.get("close"),
+                stage2=p.get("stage2"), base_grade=p.get("base_grade"),
+                from_pivot_pct=p.get("from_pivot_pct"),
+                kind="breakout")
+            p["gate"] = g
+            if g.get("ok"):
+                keep.append(p)
+            else:
+                p["gate_reasons"] = g.get("reasons") or []
+                data["rejected"].append({"symbol": p["symbol"],
+                                         "verdict": g.get("verdict"),
+                                         "reasons": p["gate_reasons"]})
+                print(f"[gate] {p['symbol']} not published: {g.get('verdict')} — "
+                      + "; ".join(p["gate_reasons"])[:160], file=sys.stderr)
+        # The heat cap decides how many positions the book can take. The gate
+        # decides which of these are worth taking.
+        plans = keep[:budget] if budget else keep
+
     data["plans"] = plans
     data["params"] = {"capital": capital, "risk_pct": risk_pct,
                       "watchlist": WATCHLIST, "candidates": candidates}
@@ -582,6 +622,26 @@ def collect(capital: float | None = None, risk_pct: float | None = None,
         )
     except Exception as e:  # never let this section break the bulletin
         data["deep"] = {"candidates": [], "note": f"deep analysis unavailable: {e}"}
+
+    # ---- results ahead ------------------------------------------------------
+    # Which companies report inside the next week, and whether the chart is
+    # ready for it. The point is to buy the setup before the number, not to
+    # be told afterwards that the stock moved.
+    try:
+        import pre_results
+        rows = pre_results.scan(within=7, with_setup=True)
+        ready_rows = [r for r in rows if pre_results.ready(r)]
+        market = pre_results.market_reaction()
+        data["results_ahead"] = {
+            "rows": rows,
+            "ready": ready_rows,
+            "market": market,
+            "window": 7,
+        }
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] results ahead unavailable: {exc}", file=sys.stderr)
+        data["results_ahead"] = {"rows": [], "ready": [], "market": {},
+                                 "window": 7}
 
     # ---- did the alerts precede a move? -------------------------------------
     try:

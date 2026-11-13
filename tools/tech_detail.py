@@ -180,9 +180,29 @@ def detail(symbol: str) -> dict:
               if r["close"]]
     avg_range = sum(ranges) / len(ranges) if ranges else None
 
+    # A reversal day: the price ran and then gave it back, on volume. The
+    # breakout can still be intact, but somebody was selling into it.
+    reversal = None
+    rng = h - lo
+    if rng > 0 and prev:
+        close_pos = (c - lo) / rng          # 0 = on the low, 1 = on the high
+        gap = (o / prev - 1) * 100
+        if close_pos <= 0.40 and v50 and v / v50 >= 1.2:
+            reversal = {
+                "flag": True,
+                "close_pos": round(close_pos, 2),
+                "from_high_pct": round((c / h - 1) * 100, 2),
+                "vol_x": round(v / v50, 2) if v50 else None,
+                "text": (f"today it ran to {h:,.2f} and closed at {c:,.2f}, "
+                         f"{(c / h - 1) * 100:.1f}% off the high, on "
+                         f"{(v / v50) if v50 else 0:.1f}x the average volume. "
+                         "That is supply, not demand — somebody sold into it."),
+            }
+
     return {
         "symbol": symbol,
         "close": c,
+        "reversal": reversal,
         "prev_close": prev,
         "change_pct": _pct(c, prev),
         "gap_pct": _pct(o, prev),
