@@ -254,8 +254,13 @@ def trading_days_until(target: str | None, today: date | None = None) -> int | N
     return n
 
 
-def annotate(symbols: list[str]) -> dict[str, dict]:
-    """symbol -> {date, source, sessions}. Fills the cache for what is missing."""
+def annotate(symbols: list[str], network: bool = True) -> dict[str, dict]:
+    """symbol -> {date, source, sessions}.
+
+    The offline estimate comes first and the network only confirms it. A
+    report that waits on Yahoo to learn when a company reports is a report
+    that arrives after the open — and Yahoo has been throttling all week.
+    """
     today = date.today()
     store = _load()
     wanted = [s for s in dict.fromkeys(symbols) if s]
@@ -266,7 +271,11 @@ def annotate(symbols: list[str]) -> dict[str, dict]:
             continue
         if fetched >= MAX_FETCH:
             break
-        res = fetch(sym, today)
+        res = fetch(sym, today) if network else {"date": None, "source": "unknown"}
+        if not res.get("date"):
+            off = estimate_offline(sym, today)
+            if off.get("date"):
+                res = off
         store["symbols"][sym] = {"at": datetime.now().isoformat(timespec="seconds"),
                                  **res}
         fetched += 1
@@ -278,8 +287,14 @@ def annotate(symbols: list[str]) -> dict[str, dict]:
     for sym in wanted:
         e = store["symbols"].get(sym) or {}
         d = e.get("date")
+        if not d:
+            off = estimate_offline(sym, today)
+            if off.get("date"):
+                d = off["date"]
+                e = {**e, **off}
         out[sym] = {"date": d, "source": e.get("source") or "unknown",
-                    "sessions": trading_days_until(d, today)}
+                    "sessions": trading_days_until(d, today),
+                    "samples": e.get("samples")}
     return out
 
 

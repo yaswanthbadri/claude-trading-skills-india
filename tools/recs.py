@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import shutil
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -59,12 +60,39 @@ def load() -> dict:
     return {"version": 1, "records": [], "updated": None}
 
 
-def save(store: dict) -> None:
+def save(store: dict, allow_shrink: bool = False) -> bool:
+    """Write the book. Refuse to make it smaller without saying so.
+
+    This file is the entire track record: every verdict the desk has ever
+    published and every trade it has graded comes from here. A bug that
+    quietly drops half of it would not announce itself — the reports would
+    simply stop mentioning trades the reader remembers being told about.
+
+    So a shrink is refused, the previous file is kept as a backup, and the
+    refusal is loud.
+    """
     DATA.mkdir(parents=True, exist_ok=True)
+    current = 0
+    if STORE.exists():
+        try:
+            current = len(json.loads(STORE.read_text()).get("records") or [])
+        except Exception:
+            current = 0
+    new = len(store.get("records") or [])
+    if current and new < current and not allow_shrink:
+        backup = STORE.with_suffix(".bak.json")
+        try:
+            shutil.copy2(STORE, backup)
+        except Exception:
+            pass
+        print(f"[warn] refused to shrink the book: {current} records -> {new}. "
+              f"Previous file kept at {backup.name}.", file=sys.stderr)
+        return False
     store["updated"] = datetime.now().isoformat(timespec="seconds")
     tmp = STORE.with_suffix(".tmp")
     tmp.write_text(json.dumps(store, indent=1, default=str))
     tmp.replace(STORE)
+    return True
 
 
 def _rid(symbol: str, day: str) -> str:
@@ -120,12 +148,16 @@ def record(data: dict, source: str | None = None) -> int:
     # A plan that is still live was already a position you were told to take.
     # Publishing it again tomorrow is fine; booking it twice is not, because
     # the risk engine would count the same rupees twice and the desk would
-    # "recommend" a stock you already hold at the same trigger.
-    live_entries: dict[tuple[str, float], str] = {}
+    # "recommend" a stock you already hold.
+    #
+    # The key is the SYMBOL, not the entry. The trigger moves with the price:
+    # CENTUM's plan was 4,238.50 on one session and 4,274.60 on the next, and
+    # keying on the entry booked the same stock twice — two positions, twice
+    # the risk, and a book that listed it twice.
+    live_by_symbol: dict[str, dict] = {}
     for r in store["records"]:
         if r.get("status") in ("pending_fill", "filled", "t1_hit"):
-            key = (r["symbol"], round(float(r.get("entry") or 0), 2))
-            live_entries.setdefault(key, r.get("live_from") or r.get("date") or "")
+            live_by_symbol.setdefault(r["symbol"], r)
 
     def add(symbol, plan, src, structure, score=None, base_type=None,
             base_grade=None, sector=None):
@@ -133,10 +165,20 @@ def record(data: dict, source: str | None = None) -> int:
         if not symbol or not plan or not plan.get("entry"):
             return
 
-        key = (symbol, round(float(plan.get("entry")), 2))
-        held_on = live_entries.get(key)
-        if held_on and held_on != first_session:
-            # Same trigger, same stock, already on the book: refresh nothing.
+        live = live_by_symbol.get(symbol)
+        if live is not None and live.get("id") != _rid(symbol, first_session):
+            if live.get("status") in ("filled", "t1_hit"):
+                # Already in the book. One position per stock: a second entry
+                # is a bigger bet, not a new idea.
+                return
+            # Still a live order. The trigger moves with the price, so the
+            # levels are refreshed in place — one record, not two.
+            for k in ("entry", "limit", "stop", "t1", "t2", "qty"):
+                if plan.get(k) is not None:
+                    live[k] = plan.get(k)
+            live["published_at"] = published
+            live["notes"] = list(live.get("notes") or []) + [
+                f"levels refreshed {published[:10]}"]
             return
         # Key on the session the plan is FOR, not the evening it was published.
         # An after-close plan for Thursday and Thursday's 09:00 plan are the same
@@ -166,7 +208,7 @@ def record(data: dict, source: str | None = None) -> int:
             return
         by_id[rid] = rec
         store["records"].append(rec)
-        live_entries[key] = first_session
+        live_by_symbol[symbol] = rec
         added += 1
 
     for p in data.get("plans") or []:
@@ -439,7 +481,38 @@ def scorecard(sessions: int = 20) -> dict:
         "rows": rows,
         "open_rows": [x for x in rows if x["status"] in ("filled", "t1_hit")],
         "closed_rows": [x for x in rows if x["status"] not in ("filled", "t1_hit")],
+        "stale_pending": _stale_pending(pending),
     }
+
+
+def _stale_pending(pending: list[dict]) -> list[dict]:
+    """Pending triggers the market has walked away from.
+
+    A trigger published two sessions ago at 13,421 is not a commitment when
+    the stock is now 8% below it. It is a note from a session that has passed,
+    and it should be cancelled rather than counted as risk.
+    """
+    out = []
+    seen = set()
+    for r in pending:
+        try:
+            if r["symbol"] in seen:
+                continue          # the same order, published for two sessions
+            entry = r.get("entry")
+            bars = _bars(r["symbol"])
+            if not entry or not bars:
+                continue
+            last = float(bars[-1]["close"])
+            below = (entry / last - 1) * 100 if last else None
+            if below is not None and below > 3.0:
+                seen.add(r["symbol"])
+                out.append({"symbol": r["symbol"], "entry": entry,
+                            "last_close": round(last, 2),
+                            "below_trigger_pct": round(below, 2),
+                            "date": r.get("live_from") or r.get("date")})
+        except Exception:
+            continue
+    return out
 
 
 def _bucket(rows: list[dict]) -> dict:
@@ -519,8 +592,18 @@ def focus_list(data: dict, card: dict) -> list[str]:
         out.append(f"Manage {card['open_count']} open position(s): {names}. "
                    "Trail stops, do not add to a loser.")
     if card["pending_count"]:
-        out.append(f"{card['pending_count']} trigger(s) still pending — re-check the levels "
-                   "before the open; a stale trigger gets cancelled.")
+        stale = card.get("stale_pending") or []
+        live = card["pending_count"] - len(stale)
+        if stale:
+            names = ", ".join(r["symbol"] for r in stale[:6])
+            out.append(f"{len(stale)} of your {card['pending_count']} trigger(s) "
+                       f"are stale — the price has moved away from them ({names}"
+                       + (", …" if len(stale) > 6 else "") +
+                       "). Cancel those orders; they are not going to fill on "
+                       "levels the market has left.")
+        else:
+            out.append(f"{card['pending_count']} trigger(s) still pending — re-check the levels "
+                       "before the open; a stale trigger gets cancelled.")
     stopped = [r for r in card["closed_rows"] if r["status"] == "stopped"]
     if stopped:
         out.append(f"{len(stopped)} stopped out. Re-entry needs a fresh base, not hope.")

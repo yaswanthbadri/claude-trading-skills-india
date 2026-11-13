@@ -1097,6 +1097,145 @@ class TestTheDataIsFresh(unittest.TestCase):
         self.assertIsInstance(rows, list)
 
 
+class TestOnePositionPerStock(unittest.TestCase):
+    """A second entry is a bigger bet, not a new idea.
+
+    The dedupe key used to be (symbol, entry). The trigger moves with the
+    price, so CENTUM's plan was 4,238.50 on one session and 4,274.60 on the
+    next, and the same stock was booked twice: two positions, twice the risk,
+    and a book that listed it twice.
+    """
+
+    def test_a_moved_trigger_does_not_book_the_stock_twice(self):
+        import recs
+        orig_load, orig_save = recs.load, recs.save
+        store = {"version": 1, "records": []}
+        recs.load = lambda: store
+        recs.save = lambda s: None
+        try:
+            data = {"generated_at": "2026-11-12T09:00:00", "plans": [
+                {"symbol": "TEST", "trigger": 100.0, "limit": 103.0, "stop": 95.0,
+                 "targets": [{"price": 110.0}, {"price": 120.0}], "qty": 10,
+                 "base_type": "VCP", "base_grade": "A"}]}
+            recs.record(data)
+            # the next session the trigger has moved, but it is the same stock
+            data2 = {"generated_at": "2026-11-13T09:00:00", "plans": [
+                {"symbol": "TEST", "trigger": 104.0, "limit": 107.0, "stop": 98.0,
+                 "targets": [{"price": 114.0}, {"price": 124.0}], "qty": 9,
+                 "base_type": "VCP", "base_grade": "A"}]}
+            recs.record(data2)
+            live = [r for r in store["records"]
+                    if r["status"] in ("pending_fill", "filled", "t1_hit")]
+            self.assertEqual(len(live), 1, "the same stock was booked twice")
+            # and the live order's levels are refreshed, not duplicated
+            self.assertEqual(live[0]["entry"], 104.0)
+        finally:
+            recs.load, recs.save = orig_load, orig_save
+
+    def test_a_second_position_in_a_filled_stock_is_refused(self):
+        import recs
+        orig_load, orig_save = recs.load, recs.save
+        store = {"version": 1, "records": [{
+            "id": "2026-11-12:TEST", "symbol": "TEST", "status": "filled",
+            "entry": 100.0, "stop": 95.0, "qty": 10, "date": "2026-11-12",
+            "live_from": "2026-11-12"}]}
+        recs.load = lambda: store
+        recs.save = lambda s: None
+        try:
+            recs.record({"generated_at": "2026-11-13T09:00:00", "plans": [
+                {"symbol": "TEST", "trigger": 104.0, "limit": 107.0, "stop": 98.0,
+                 "targets": [{"price": 114.0}], "qty": 9}]})
+            self.assertEqual(len(store["records"]), 1)
+        finally:
+            recs.load, recs.save = orig_load, orig_save
+
+    def test_a_closed_trade_is_kept_for_the_scorecard(self):
+        import recs
+        orig_load, orig_save = recs.load, recs.save
+        store = {"version": 1, "records": [{
+            "id": "2026-11-12:TEST", "symbol": "TEST", "status": "stopped",
+            "entry": 100.0, "stop": 95.0, "qty": 10, "date": "2026-11-12",
+            "live_from": "2026-11-12", "r_realized": -1.0}]}
+        recs.load = lambda: store
+        recs.save = lambda s: None
+        try:
+            recs.record({"generated_at": "2026-11-13T09:00:00", "plans": [
+                {"symbol": "TEST", "trigger": 104.0, "limit": 107.0, "stop": 98.0,
+                 "targets": [{"price": 114.0}], "qty": 9}]})
+            self.assertEqual(len(store["records"]), 2)
+        finally:
+            recs.load, recs.save = orig_load, orig_save
+
+
+class TestStaleTriggers(unittest.TestCase):
+    """A trigger the market walked away from is not a commitment."""
+
+    def test_a_stale_trigger_is_flagged_and_not_counted_as_risk(self):
+        import heat
+        orig_pos = heat.positions
+        heat.positions = lambda: [
+            {"symbol": "A", "kind": "open", "qty": 100, "entry": 100.0,
+             "stop": 95.0, "risk": 500.0, "sector": "Energy"},
+            {"symbol": "B", "kind": "pending", "qty": 100, "entry": 100.0,
+             "stop": 95.0, "risk": 500.0, "sector": "IT",
+             "last_close": 94.0, "below_trigger_pct": 6.4, "stale": True},
+            {"symbol": "C", "kind": "pending", "qty": 100, "entry": 100.0,
+             "stop": 95.0, "risk": 500.0, "sector": "IT",
+             "last_close": 99.5, "below_trigger_pct": 0.5, "stale": False},
+        ]
+        try:
+            h = heat.compute(capital=100_000, risk_pct=1.0, cap_pct=6.0)
+        finally:
+            heat.positions = orig_pos
+        self.assertEqual(h["committed"], 500)        # only the live one
+        self.assertEqual(h["stale_count"], 1)
+        self.assertEqual(h["stale_risk"], 500)
+        # and the headline says which ones to cancel
+        line = " ".join(heat.headline(h))
+        self.assertIn("stale", line)
+        self.assertIn("B", line)
+
+
+class TestTheTrackRecordIsProtected(unittest.TestCase):
+    """The book is the only memory the desk has.
+
+    A bug that quietly drops half of it would not announce itself: the
+    reports would simply stop mentioning trades the reader remembers being
+    told about.
+    """
+
+    def test_a_shrink_is_refused_and_the_old_file_is_kept(self):
+        import recs
+        import tempfile
+        import shutil
+        orig_store = recs.STORE
+        tmp = pathlib.Path(tempfile.mkdtemp()) / "recs.json"
+        recs.STORE = tmp
+        try:
+            recs.save({"records": [{"id": "a"}, {"id": "b"}, {"id": "c"}]})
+            ok = recs.save({"records": [{"id": "a"}]})
+            self.assertFalse(ok, "a shrinking write was allowed")
+            self.assertEqual(len(recs.load()["records"]), 3)
+            backup = tmp.with_name("recs.bak.json")
+            self.assertTrue(backup.exists())
+        finally:
+            recs.STORE = orig_store
+
+    def test_a_shrink_can_be_forced_on_purpose(self):
+        import recs
+        import tempfile
+        orig_store = recs.STORE
+        tmp = pathlib.Path(tempfile.mkdtemp()) / "recs.json"
+        recs.STORE = tmp
+        try:
+            recs.save({"records": [{"id": "a"}, {"id": "b"}]})
+            ok = recs.save({"records": [{"id": "a"}]}, allow_shrink=True)
+            self.assertTrue(ok)
+            self.assertEqual(len(recs.load()["records"]), 1)
+        finally:
+            recs.STORE = orig_store
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -1295,6 +1434,145 @@ class TestTheDataIsFresh(unittest.TestCase):
         import build_cache
         rows = build_cache.behind(build_cache.date.today())
         self.assertIsInstance(rows, list)
+
+
+class TestOnePositionPerStock(unittest.TestCase):
+    """A second entry is a bigger bet, not a new idea.
+
+    The dedupe key used to be (symbol, entry). The trigger moves with the
+    price, so CENTUM's plan was 4,238.50 on one session and 4,274.60 on the
+    next, and the same stock was booked twice: two positions, twice the risk,
+    and a book that listed it twice.
+    """
+
+    def test_a_moved_trigger_does_not_book_the_stock_twice(self):
+        import recs
+        orig_load, orig_save = recs.load, recs.save
+        store = {"version": 1, "records": []}
+        recs.load = lambda: store
+        recs.save = lambda s: None
+        try:
+            data = {"generated_at": "2026-11-12T09:00:00", "plans": [
+                {"symbol": "TEST", "trigger": 100.0, "limit": 103.0, "stop": 95.0,
+                 "targets": [{"price": 110.0}, {"price": 120.0}], "qty": 10,
+                 "base_type": "VCP", "base_grade": "A"}]}
+            recs.record(data)
+            # the next session the trigger has moved, but it is the same stock
+            data2 = {"generated_at": "2026-11-13T09:00:00", "plans": [
+                {"symbol": "TEST", "trigger": 104.0, "limit": 107.0, "stop": 98.0,
+                 "targets": [{"price": 114.0}, {"price": 124.0}], "qty": 9,
+                 "base_type": "VCP", "base_grade": "A"}]}
+            recs.record(data2)
+            live = [r for r in store["records"]
+                    if r["status"] in ("pending_fill", "filled", "t1_hit")]
+            self.assertEqual(len(live), 1, "the same stock was booked twice")
+            # and the live order's levels are refreshed, not duplicated
+            self.assertEqual(live[0]["entry"], 104.0)
+        finally:
+            recs.load, recs.save = orig_load, orig_save
+
+    def test_a_second_position_in_a_filled_stock_is_refused(self):
+        import recs
+        orig_load, orig_save = recs.load, recs.save
+        store = {"version": 1, "records": [{
+            "id": "2026-11-12:TEST", "symbol": "TEST", "status": "filled",
+            "entry": 100.0, "stop": 95.0, "qty": 10, "date": "2026-11-12",
+            "live_from": "2026-11-12"}]}
+        recs.load = lambda: store
+        recs.save = lambda s: None
+        try:
+            recs.record({"generated_at": "2026-11-13T09:00:00", "plans": [
+                {"symbol": "TEST", "trigger": 104.0, "limit": 107.0, "stop": 98.0,
+                 "targets": [{"price": 114.0}], "qty": 9}]})
+            self.assertEqual(len(store["records"]), 1)
+        finally:
+            recs.load, recs.save = orig_load, orig_save
+
+    def test_a_closed_trade_is_kept_for_the_scorecard(self):
+        import recs
+        orig_load, orig_save = recs.load, recs.save
+        store = {"version": 1, "records": [{
+            "id": "2026-11-12:TEST", "symbol": "TEST", "status": "stopped",
+            "entry": 100.0, "stop": 95.0, "qty": 10, "date": "2026-11-12",
+            "live_from": "2026-11-12", "r_realized": -1.0}]}
+        recs.load = lambda: store
+        recs.save = lambda s: None
+        try:
+            recs.record({"generated_at": "2026-11-13T09:00:00", "plans": [
+                {"symbol": "TEST", "trigger": 104.0, "limit": 107.0, "stop": 98.0,
+                 "targets": [{"price": 114.0}], "qty": 9}]})
+            self.assertEqual(len(store["records"]), 2)
+        finally:
+            recs.load, recs.save = orig_load, orig_save
+
+
+class TestStaleTriggers(unittest.TestCase):
+    """A trigger the market walked away from is not a commitment."""
+
+    def test_a_stale_trigger_is_flagged_and_not_counted_as_risk(self):
+        import heat
+        orig_pos = heat.positions
+        heat.positions = lambda: [
+            {"symbol": "A", "kind": "open", "qty": 100, "entry": 100.0,
+             "stop": 95.0, "risk": 500.0, "sector": "Energy"},
+            {"symbol": "B", "kind": "pending", "qty": 100, "entry": 100.0,
+             "stop": 95.0, "risk": 500.0, "sector": "IT",
+             "last_close": 94.0, "below_trigger_pct": 6.4, "stale": True},
+            {"symbol": "C", "kind": "pending", "qty": 100, "entry": 100.0,
+             "stop": 95.0, "risk": 500.0, "sector": "IT",
+             "last_close": 99.5, "below_trigger_pct": 0.5, "stale": False},
+        ]
+        try:
+            h = heat.compute(capital=100_000, risk_pct=1.0, cap_pct=6.0)
+        finally:
+            heat.positions = orig_pos
+        self.assertEqual(h["committed"], 500)        # only the live one
+        self.assertEqual(h["stale_count"], 1)
+        self.assertEqual(h["stale_risk"], 500)
+        # and the headline says which ones to cancel
+        line = " ".join(heat.headline(h))
+        self.assertIn("stale", line)
+        self.assertIn("B", line)
+
+
+class TestTheTrackRecordIsProtected(unittest.TestCase):
+    """The book is the only memory the desk has.
+
+    A bug that quietly drops half of it would not announce itself: the
+    reports would simply stop mentioning trades the reader remembers being
+    told about.
+    """
+
+    def test_a_shrink_is_refused_and_the_old_file_is_kept(self):
+        import recs
+        import tempfile
+        import shutil
+        orig_store = recs.STORE
+        tmp = pathlib.Path(tempfile.mkdtemp()) / "recs.json"
+        recs.STORE = tmp
+        try:
+            recs.save({"records": [{"id": "a"}, {"id": "b"}, {"id": "c"}]})
+            ok = recs.save({"records": [{"id": "a"}]})
+            self.assertFalse(ok, "a shrinking write was allowed")
+            self.assertEqual(len(recs.load()["records"]), 3)
+            backup = tmp.with_name("recs.bak.json")
+            self.assertTrue(backup.exists())
+        finally:
+            recs.STORE = orig_store
+
+    def test_a_shrink_can_be_forced_on_purpose(self):
+        import recs
+        import tempfile
+        orig_store = recs.STORE
+        tmp = pathlib.Path(tempfile.mkdtemp()) / "recs.json"
+        recs.STORE = tmp
+        try:
+            recs.save({"records": [{"id": "a"}, {"id": "b"}]})
+            ok = recs.save({"records": [{"id": "a"}]}, allow_shrink=True)
+            self.assertTrue(ok)
+            self.assertEqual(len(recs.load()["records"]), 1)
+        finally:
+            recs.STORE = orig_store
 
 
 if __name__ == "__main__":

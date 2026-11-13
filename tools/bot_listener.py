@@ -213,13 +213,17 @@ def status_text(chat_id=None) -> str:
 
 def book_text() -> str:
     """Open positions, live, in R. R is the unit that makes sizes comparable."""
+    stale = []
     try:
         import recs
+        recs.evaluate()
         rows = [r for r in recs.load()["records"]
                 if r.get("status") in ("filled", "t1_hit")]
+        card = recs.scorecard()
+        stale = card.get("stale_pending") or []
     except Exception as exc:  # noqa: BLE001
         return f"⚠️ Could not read the book: {_esc(exc)}"
-    if not rows:
+    if not rows and not stale:
         return ("💼 <b>Book is empty.</b>\n"
                 "<i>No filled positions. Pending triggers are in /heat.</i>")
 
@@ -243,6 +247,15 @@ def book_text() -> str:
     L += ["", f"<i>Sum of open R: {total:+.2f} · "
               f"{len(rows)} position(s)</i>",
           "<i>R = 1× what you agreed to lose at the stop.</i>"]
+
+    if stale:
+        L += ["", f"🧹 <b>{len(stale)} stale trigger(s)</b>",
+              "<i>The price has moved away from these. Cancel the orders — they "
+              "will not fill on levels the market has left.</i>"]
+        for r in stale[:8]:
+            L.append(f"• {_esc(r['symbol'])} · trigger {_n(r.get('entry'))} · "
+                     f"now {_n(r.get('last_close'))} "
+                     f"({_pct(r.get('below_trigger_pct'))} below)")
     return "\n".join(L)
 
 

@@ -162,7 +162,7 @@ def msg_overview(d: dict) -> str:
                else "stressed" if vix and vix < 25 else "panic")
     rsi_note = ""
     try:
-        if float(str(idx["rsi"]).split()[0]) >= 70:
+        if float(str(idx.get("rsi") or "0").split()[0]) >= 70:
             rsi_note = "\n<i>RSI is stretched — prefer pullbacks over chasing.</i>"
     except (ValueError, IndexError):
         pass
@@ -186,12 +186,15 @@ def msg_overview(d: dict) -> str:
         f"📊 <b>{heading} — India</b>\n"
         f"<i>{esc(stamp)} IST{fresh_note}</i>{closed_note}\n"
         f"───────────────\n"
-        f"<b>NIFTY 50</b>  {n(idx['close'])}  ({pct(idx['change_pct'])})\n"
+        f"<b>NIFTY 50</b>  {n(idx.get('close'))}  ({pct(idx.get('change_pct'))})\n"
         f"<b>India VIX</b>  {n(vix)}  · {vix_tag}\n"
-        f"<b>Regime</b>  {esc(reg['label'])}  · risk {reg['risk_score']}/100\n"
-        f"<b>Exposure</b>  up to {reg['exposure_pct']}% · max {reg['max_positions']} new positions\n"
-        f"<b>RSI</b> {esc(str(idx['rsi']))}  ·  <b>ADX</b> {esc(str(idx['adx']))}\n"
-        f"<b>52W range</b>  {n(idx['low_52w'])} – {n(idx['high_52w'])}\n"
+        f"<b>Regime</b>  {esc(reg.get('label') or 'unknown')}  · "
+        f"risk {reg.get('risk_score')}/100\n"
+        f"<b>Exposure</b>  up to {reg.get('exposure_pct')}% · "
+        f"max {reg.get('max_positions')} new positions\n"
+        f"<b>RSI</b> {esc(str(idx.get('rsi') or 'n/a'))}  ·  "
+        f"<b>ADX</b> {esc(str(idx.get('adx') or 'n/a'))}\n"
+        f"<b>52W range</b>  {n(idx.get('low_52w'))} – {n(idx.get('high_52w'))}\n"
         f"───────────────\n"
         f"{dot} {esc(line)}{rsi_note}"
     )

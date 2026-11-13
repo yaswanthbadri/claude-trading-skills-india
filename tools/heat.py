@@ -45,6 +45,22 @@ def _sector_map() -> dict:
         return {}
 
 
+def _last_close(symbol: str) -> float | None:
+    """The newest cached close for one symbol."""
+    try:
+        import recs
+        bars = recs._bars(symbol)
+        return float(bars[-1]["close"]) if bars else None
+    except Exception:
+        return None
+
+
+# How far below its trigger a pending order can be before it is called dead.
+# Three percent is the chase rule: beyond it the order would not have been
+# placed on today's prices, so it is stale rather than pending.
+STALE_BELOW_PCT = 3.0
+
+
 def positions() -> list[dict]:
     """The book, with the rupee risk each row carries."""
     import recs
@@ -70,7 +86,7 @@ def positions() -> list[dict]:
         if key in seen:
             continue
         seen.add(key)
-        out.append({
+        row = {
             "symbol": r["symbol"],
             "status": status,
             "kind": kind,
@@ -80,7 +96,18 @@ def positions() -> list[dict]:
             "risk": round((base - stop) * qty, 0),
             "sector": r.get("sector") or "",
             "date": r.get("live_from") or r.get("date"),
-        })
+        }
+        if kind == "pending":
+            # Is this trigger still live? The market has moved since it was
+            # published; if the price has fallen away from it, the order is
+            # not a commitment any more, it is a note from two days ago.
+            px = _last_close(r["symbol"])
+            if px:
+                below = (base / px - 1) * 100 if px else None
+                row["last_close"] = round(px, 2)
+                row["below_trigger_pct"] = round(below, 2) if below is not None else None
+                row["stale"] = bool(below is not None and below > STALE_BELOW_PCT)
+        out.append(row)
     return out
 
 
@@ -98,7 +125,13 @@ def compute(capital: float | None = None, risk_pct: float | None = None,
             r["sector"] = sectors.get(r["symbol"], "") or "Other"
 
     at_risk = sum(r["risk"] for r in rows if r["kind"] == "open")
-    committed = sum(r["risk"] for r in rows if r["kind"] == "pending")
+    # A stale trigger is not money at risk. It is a note from a session that
+    # has passed, and counting it as committed hides how much room there
+    # really is.
+    stale_rows = [r for r in rows if r["kind"] == "pending" and r.get("stale")]
+    live_rows = [r for r in rows if r["kind"] == "pending" and not r.get("stale")]
+    committed = sum(r["risk"] for r in live_rows)
+    stale_risk = sum(r["risk"] for r in stale_rows)
     per_trade = capital * risk_pct / 100.0
     cap_rs = capital * cap_pct / 100.0
 
@@ -148,6 +181,9 @@ def compute(capital: float | None = None, risk_pct: float | None = None,
         "at_risk_pct": used_pct,
         "committed": round(committed),
         "committed_pct": committed_pct,
+        "stale_count": len(stale_rows),
+        "stale_risk": round(stale_risk),
+        "stale_rows": stale_rows,
         "headroom_pct": headroom,
         "headroom_rupees": round(max(0, cap_rs - at_risk)),
         "slots": slots,
@@ -161,9 +197,13 @@ def compute(capital: float | None = None, risk_pct: float | None = None,
 def headline(h: dict) -> list[str]:
     """Plain sentences, worst fact first."""
     out = []
-    out.append(f"{h['open_count']} open and {h['pending_count']} waiting: "
+    stale = h.get("stale_count") or 0
+    live_pending = h["pending_count"] - stale
+    waiting = (f"{live_pending} waiting" if not stale
+               else f"{live_pending} waiting and {stale} stale")
+    out.append(f"{h['open_count']} open and {waiting}: "
                f"₹{h['at_risk']:,.0f} at risk ({h['at_risk_pct']:.1f}% of capital), "
-               f"₹{h['committed']:,.0f} more if every trigger fills "
+               f"₹{h['committed']:,.0f} more if every live trigger fills "
                f"({h['committed_pct']:.1f}%).")
     if h["status"] == "hot":
         out.append(f"That is at or past the {h['cap_pct']:g}% heat cap. "
@@ -178,6 +218,14 @@ def headline(h: dict) -> list[str]:
         out.append(f"If every pending trigger fills you would be at "
                    f"{h['committed_pct']:.1f}%, above the {h['cap_pct']:g}% cap — "
                    f"place the best few, not all of them.")
+    if stale:
+        names = ", ".join(r["symbol"] for r in (h.get("stale_rows") or [])[:6])
+        out.append(f"{stale} trigger(s) are stale — the price has moved away "
+                   f"from them ({names}"
+                   + (", …" if stale > 6 else "")
+                   + f"). Cancel those orders: they are holding "
+                   f"₹{h.get('stale_risk', 0):,.0f} of risk that is not really "
+                   "there, and they are the reason the book looks full.")
     for s in h["clusters"]:
         out.append(f"{s['sector']} carries {s['count']} names "
                    f"({', '.join(s['symbols'])}) — ₹{s['risk']:,.0f} of correlated risk.")

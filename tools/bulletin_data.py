@@ -424,13 +424,14 @@ def collect(capital: float | None = None, risk_pct: float | None = None,
                   f"{heat['cap_pct']:g}% cap — {budget} new plan(s) instead of "
                   f"{candidates}", file=sys.stderr)
 
-    # Never re-recommend something you already own and have filled: a second
-    # entry is a different trade at a different price, not this one.
+    # Never re-recommend a stock you already hold or already have a live
+    # order on. A second entry is a bigger bet, not a new idea, and booking
+    # it twice would count the same rupees twice in the heat.
     held = set()
     try:
         import recs as _recs
         held = {r["symbol"] for r in _recs.load()["records"]
-                if r.get("status") in ("filled", "t1_hit")}
+                if r.get("status") in ("filled", "t1_hit", "pending_fill")}
     except Exception:
         pass
 
