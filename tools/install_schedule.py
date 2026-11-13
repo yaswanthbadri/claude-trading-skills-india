@@ -172,6 +172,16 @@ def build_plists() -> dict[str, str]:
                         for h in range(10, 16)]
                      + [{"Weekday": d, "Hour": 15, "Minute": 40} for d in WEEKDAYS]
                      + [{"Weekday": d, "Hour": 19, "Minute": 30} for d in WEEKDAYS])
+    # The results calendar: who reports, and when. Yahoo's earnings history
+    # is slow, so it runs after the close, when nothing is waiting on it.
+    plists["com.tradingskills.results"] = (
+        _base("com.tradingskills.results", "results_calendar.py", ["--build"])
+        + _calendar([{"Weekday": d, "Hour": 19, "Minute": 35} for d in WEEKDAYS])
+        + f"  <key>StandardOutPath</key>\n  <string>{LOGS / 'cache.log'}</string>\n"
+        + f"  <key>StandardErrorPath</key>\n  <string>{LOGS / 'cache.log'}</string>\n"
+        + FOOTER
+    )
+
     plists["com.tradingskills.cache"] = (
         _base("com.tradingskills.cache", "build_cache.py", [])
         + _calendar(cache_entries)
