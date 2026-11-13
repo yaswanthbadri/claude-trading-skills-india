@@ -708,6 +708,52 @@ def scan_shocks(state: dict, dry: bool) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# stale triggers
+# ---------------------------------------------------------------------------
+def scan_stale_triggers(state: dict, dry: bool = False) -> list[str]:
+    """Tell the desk when a live order has been walked away from.
+
+    A GTT published two sessions ago at 13,421 is not a commitment when the
+    stock is now 8% below it. It is a note from a session that has passed.
+    The reader has to cancel the order; nothing else will do it for them.
+    """
+    sent = []
+    try:
+        import recs
+        recs.evaluate()
+        card = recs.scorecard()
+        stale = card.get("stale_pending") or []
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] stale trigger scan failed: {exc}", file=sys.stderr)
+        return sent
+
+    for r in stale:
+        sym = r["symbol"]
+        key = f"stale:{sym}:{datetime.now().strftime('%Y-%m-%d')}"
+        if _cooled(state, key, 60 * 24):
+            continue
+        body = (f"🧹 <b>{esc(sym)}</b> — your trigger is stale\n"
+                f"───────────────\n"
+                f"You were told to buy above <b>{r['entry']:,.2f}</b>. "
+                f"The price is now <b>{r['last_close']:,.2f}</b> — "
+                f"{r['below_trigger_pct']:.1f}% below the level.\n\n"
+                "The market has walked away from it. The order will not fill "
+                "on a level nobody is defending, and it is still holding "
+                "money out of your risk budget.\n\n"
+                "<i>Cancel the GTT, or re-check the setup with /check "
+                + esc(sym) + " before you do. Educational only — not advice.</i>")
+        if send_telegram(body, dry=dry, reply_markup=buttons.alert(sym)):
+            if not dry:
+                _audit(sym, "stale trigger",
+                       f"trigger {r['entry']:.2f} is {r['below_trigger_pct']:.1f}% "
+                       "above the price", "book", "")
+                _mark(state, key)
+            sent.append(sym)
+            print(f"  → {sym} trigger {r['entry']:.2f} is stale")
+    return sent
+
+
+# ---------------------------------------------------------------------------
 # results ahead
 # ---------------------------------------------------------------------------
 def scan_results(state: dict, dry: bool = False, within: int = 5) -> list[str]:
@@ -829,6 +875,10 @@ def main() -> int:
     # Results: the one alert that has to arrive before the event.
     if not news_only:
         sent += [f"results:{r}" for r in scan_results(state, dry=dry)]
+
+    # A dead order is money the reader has not freed up.
+    if not news_only:
+        sent += [f"stale:{r}" for r in scan_stale_triggers(state, dry=dry)]
 
     if not news_only and cal.is_market_open():
         sent += scan_shocks(state, dry)

@@ -40,8 +40,13 @@ REPO = Path(__file__).resolve().parents[1]
 CANDLES = REPO / "data" / "candles"
 CACHE = REPO / "data" / "results_calendar.json"
 MAX_AGE_HOURS = 30
-DEFAULT_LIMIT = 400
-THREADS = 8
+DEFAULT_LIMIT = 1200
+THREADS = 4
+CHUNK = 40          # names per round: small enough to survive a throttle
+PAUSE = 1.5         # seconds between rounds
+BACKOFF = 20        # extra pause when a round comes back mostly empty
+NIGHTLY_BUDGET = 250    # names to touch per night: the quota, not the ambition
+NEAR_TERM_DAYS = 45    # a date this close is the one the desk will act on
 
 
 def _now() -> str:
@@ -157,18 +162,83 @@ def fetch(symbol: str) -> dict:
     }
 
 
-def build(limit: int = DEFAULT_LIMIT, verbose: bool = True) -> dict:
+def _fresh_row(row: dict) -> bool:
+    at = (row or {}).get("at")
+    if not at:
+        return False
+    try:
+        return (datetime.now() - datetime.fromisoformat(at)) < timedelta(hours=MAX_AGE_HOURS)
+    except Exception:
+        return False
+
+
+def _near_term(row: dict, days: int = NEAR_TERM_DAYS) -> bool:
+    """Is this date close enough that the desk will act on it?"""
+    when = (row or {}).get("next") or (row or {}).get("estimated")
+    if not when:
+        return False
+    try:
+        d = date.fromisoformat(when)
+    except Exception:
+        return False
+    return (d - date.today()).days <= days
+
+
+def build(limit: int = DEFAULT_LIMIT, verbose: bool = True,
+          budget: int = NIGHTLY_BUDGET) -> dict:
+    """Refresh the calendar without losing what we already know.
+
+    Yahoo throttles a burst of earnings requests, and a throttled request
+    looks exactly like a company with no earnings dates. Replacing the cache
+    with the result of a throttled run took the calendar from 235 names to
+    59 — the desk lost two hundred confirmed dates because the network
+    shrugged.
+
+    So the night job works to a budget, not to an ambition:
+
+      nothing is ever dropped        a known date is kept until it is
+                                     replaced by a fresher one
+      the near-term names first      the dates inside 45 days are the ones
+                                     the desk will act on, so those get
+                                     refreshed every night
+      then the unseen liquid names   filling in the long tail, a slice at a
+                                     time
+      small rounds with a pause      and a longer pause when a round comes
+                                     back empty
+
+    A failure never removes a date we already had.
+    """
     syms = liquid_symbols(limit)
     store = load()
-    out = {}
+    known = store.get("symbols") or {}
+    keep = dict(known)
+    refresh = [s for s, row in known.items()
+               if not _fresh_row(row) or _near_term(row)]
+    unseen = [s for s in syms if s not in known]
+    todo = (refresh + unseen)[:budget]
+    if verbose:
+        print(f"calendar: {len(known):,} known, {len(refresh):,} to refresh, "
+              f"{len(unseen):,} unseen · touching {len(todo):,} tonight "
+              f"({len(syms):,} in the universe)", flush=True)
+
     t0 = time.time()
-    with ThreadPoolExecutor(max_workers=THREADS) as ex:
-        for i, res in enumerate(ex.map(fetch, syms), 1):
-            if res.get("next") or res.get("estimated"):
-                out[res["symbol"]] = res
-            if verbose and i % 50 == 0:
-                print(f"  … {i}/{len(syms)} ({time.time() - t0:.0f}s)", flush=True)
-    store["symbols"] = out
+    for i in range(0, len(todo), CHUNK):
+        chunk = todo[i:i + CHUNK]
+        got = 0
+        try:
+            with ThreadPoolExecutor(max_workers=THREADS) as ex:
+                for res in ex.map(fetch, chunk):
+                    if res.get("next") or res.get("estimated"):
+                        keep[res["symbol"]] = res
+                        got += 1
+        except Exception as exc:  # noqa: BLE001
+            print(f"[warn] calendar round failed: {exc}", file=sys.stderr)
+        if verbose:
+            print(f"  … {min(i + CHUNK, len(todo))}/{len(todo)} "
+                  f"({got} with a date, {time.time() - t0:.0f}s)", flush=True)
+        time.sleep(PAUSE if got else PAUSE + BACKOFF)
+
+    store["symbols"] = keep
     store["built"] = _now()
     store["universe"] = len(syms)
     save(store)

@@ -519,6 +519,12 @@ def _deep_md(d: dict, sec=None) -> list[str]:
                  f"{_n(b.get('weeks'), 1)} weeks · {c.get('structure')} entry · "
                  f"₹{_n(c.get('liquidity_cr'), 0)} crore/day_")
         L.append("")
+        _dg = c.get("gate") or {}
+        if _dg.get("ok") is False:
+            L.append(f"**Not an entry now.** {(_dg.get('reasons') or ['not actionable today'])[0]}. "
+                     "The structure is still worth watching, but the level has gone.")
+            L.append("")
+            continue
         L.append("| Level | Price | From entry |")
         L.append("|---|---|---|")
         L.append(f"| Entry (buy above) | {_n(p.get('entry'))} | — |")
@@ -752,6 +758,10 @@ def render_md(d: dict) -> str:
             if p["warnings"]:
                 for w in p["warnings"]:
                     a(f"- ⚠ {w}")
+            _er = p.get("event_risk") or {}
+            if _er.get("text"):
+                a(f"- 📅 Inside the holding window: {_er['text']}. Size the "
+                  "trade knowing these are there.")
             a("")
     else:
         a("No tradable setup right now. Forcing a trade in a thin tape is how accounts die — "
@@ -1463,7 +1473,15 @@ footer{
                         and p.get("results_sessions") <= 5)
                 a(f"<div class='callout{' warn' if _hot else ''}' "
                   f"style='margin:10px 0 0'>{_h.escape(_res)}</div>")
+            _dg = c.get("gate") or {}
             _gate = gate_line(p, markdown=False)
+            if _dg.get("ok") is False:
+                _why = (_dg.get("reasons") or ["not actionable today"])[0]
+                a(f"<div class='callout warn' style='margin:10px 0 0'>"
+                  f"Not an entry now — {_h.escape(_why)}. The structure is still "
+                  "worth watching, but the level has gone.</div>")
+                a("</div>")
+                continue
             if _gate:
                 a(f"<div class='callout warn' style='margin:10px 0 0'>"
                   f"🚫 {_h.escape(_gate)}</div>")
@@ -1607,7 +1625,15 @@ footer{
                         and p.get("results_sessions") <= 5)
                 a(f"<div class='callout{' warn' if _hot else ''}' "
                   f"style='margin:10px 0 0'>{_h.escape(_res)}</div>")
+            _dg = c.get("gate") or {}
             _gate = gate_line(p, markdown=False)
+            if _dg.get("ok") is False:
+                _why = (_dg.get("reasons") or ["not actionable today"])[0]
+                a(f"<div class='callout warn' style='margin:10px 0 0'>"
+                  f"Not an entry now — {_h.escape(_why)}. The structure is still "
+                  "worth watching, but the level has gone.</div>")
+                a("</div>")
+                continue
             if _gate:
                 a(f"<div class='callout warn' style='margin:10px 0 0'>"
                   f"🚫 {_h.escape(_gate)}</div>")

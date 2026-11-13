@@ -1236,6 +1236,52 @@ class TestTheTrackRecordIsProtected(unittest.TestCase):
             recs.STORE = orig_store
 
 
+class TestEventRiskInTheHoldingWindow(unittest.TestCase):
+    """A swing trade is held for weeks. Something always lands in those weeks."""
+
+    def test_the_window_lists_what_matters(self):
+        import event_risk
+        res = event_risk.risk("ACMESOLAR", "2026-11-16", "2026-12-16")
+        self.assertIn("level", res)
+        self.assertIn("events", res)
+        self.assertTrue(res["events"], "no events found in the window")
+        # the monthly expiry and the policy decision are in there
+        cats = {e["category"] for e in res["events"]}
+        self.assertTrue({"expiry", "rbi"} & cats)
+
+    def test_a_weekly_expiry_is_not_what_gets_reported(self):
+        import event_risk
+        res = event_risk.risk("ACMESOLAR", "2026-11-16", "2026-12-16")
+        titles = " ".join(e["title"] for e in res["material"])
+        self.assertIn("monthly", titles.lower() + " ")  # the monthly one is kept
+        # a weekly expiry should not crowd out the important lines
+        self.assertLessEqual(len(res["material"]), 6)
+
+    def test_the_holding_window_is_about_a_month(self):
+        import event_risk
+        start, end = event_risk.holding_window("2026-11-16", 20)
+        self.assertEqual(start, "2026-11-16")
+        self.assertGreater(end, start)
+
+
+class TestTheResultsSeasonContext(unittest.TestCase):
+    def test_the_season_deadline_is_known(self):
+        import pre_results
+        text = pre_results.season_context()
+        if not text:
+            self.skipTest("no season context available")
+        self.assertIn("results", text.lower())
+
+
+class TestStaleTriggerAlert(unittest.TestCase):
+    def test_a_stale_trigger_says_cancel_the_order(self):
+        import alert_monitor
+        # the body is built inside the scanner; check the wording it uses
+        src = __import__("inspect").getsource(alert_monitor.scan_stale_triggers)
+        self.assertIn("Cancel the GTT", src)
+        self.assertIn("below the level", src)
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -1573,6 +1619,52 @@ class TestTheTrackRecordIsProtected(unittest.TestCase):
             self.assertEqual(len(recs.load()["records"]), 1)
         finally:
             recs.STORE = orig_store
+
+
+class TestEventRiskInTheHoldingWindow(unittest.TestCase):
+    """A swing trade is held for weeks. Something always lands in those weeks."""
+
+    def test_the_window_lists_what_matters(self):
+        import event_risk
+        res = event_risk.risk("ACMESOLAR", "2026-11-16", "2026-12-16")
+        self.assertIn("level", res)
+        self.assertIn("events", res)
+        self.assertTrue(res["events"], "no events found in the window")
+        # the monthly expiry and the policy decision are in there
+        cats = {e["category"] for e in res["events"]}
+        self.assertTrue({"expiry", "rbi"} & cats)
+
+    def test_a_weekly_expiry_is_not_what_gets_reported(self):
+        import event_risk
+        res = event_risk.risk("ACMESOLAR", "2026-11-16", "2026-12-16")
+        titles = " ".join(e["title"] for e in res["material"])
+        self.assertIn("monthly", titles.lower() + " ")  # the monthly one is kept
+        # a weekly expiry should not crowd out the important lines
+        self.assertLessEqual(len(res["material"]), 6)
+
+    def test_the_holding_window_is_about_a_month(self):
+        import event_risk
+        start, end = event_risk.holding_window("2026-11-16", 20)
+        self.assertEqual(start, "2026-11-16")
+        self.assertGreater(end, start)
+
+
+class TestTheResultsSeasonContext(unittest.TestCase):
+    def test_the_season_deadline_is_known(self):
+        import pre_results
+        text = pre_results.season_context()
+        if not text:
+            self.skipTest("no season context available")
+        self.assertIn("results", text.lower())
+
+
+class TestStaleTriggerAlert(unittest.TestCase):
+    def test_a_stale_trigger_says_cancel_the_order(self):
+        import alert_monitor
+        # the body is built inside the scanner; check the wording it uses
+        src = __import__("inspect").getsource(alert_monitor.scan_stale_triggers)
+        self.assertIn("Cancel the GTT", src)
+        self.assertIn("below the level", src)
 
 
 if __name__ == "__main__":

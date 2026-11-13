@@ -559,6 +559,28 @@ def collect(capital: float | None = None, risk_pct: float | None = None,
         data["gate"] = {"blocked": gate.get("blocked") or {},
                         "flagged": gate.get("flagged") or {}}
 
+    # ---- what else lands while you hold it ---------------------------------
+    # A swing trade is held for weeks. An expiry, a policy decision or the
+    # end of results season lands inside that window every time, and the
+    # size of the trade should know about it.
+    try:
+        import event_risk
+        from datetime import date as _date, timedelta as _td
+        for p in plans:
+            live = p.get("live_from") or _date.today().isoformat()
+            try:
+                start = _date.fromisoformat(live)
+            except Exception:
+                start = _date.today()
+            end = (start + _td(days=29)).isoformat()
+            r = event_risk.risk(p["symbol"], start, end)
+            p["event_risk"] = {"level": r["level"], "text": r["text"],
+                               "events": r["material"][:4]}
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] event risk unavailable: {exc}", file=sys.stderr)
+        for p in plans:
+            p["event_risk"] = {"level": "none", "text": "", "events": []}
+
     # ---- the one gate ------------------------------------------------------
     # Every suggestion that leaves this desk goes through it. A plan that
     # cannot be acted on today is not a suggestion: it is a level the market
@@ -621,6 +643,32 @@ def collect(capital: float | None = None, risk_pct: float | None = None,
             rs_ratings=rs_map,
             universe_size=(cinfo or {}).get("files") or len(WATCHLIST.split(",")),
         )
+        # The deep list gets the same gate as the plan list. A "path to 100%"
+        # whose entry is 13% below the market is not a path, it is a memory —
+        # and the stock has already broken out.
+        import plan_gate as _pg
+        for c in (data["deep"].get("candidates") or []):
+            pl = c.get("plan") or {}
+            sym = c.get("symbol")
+            if not sym or not pl.get("entry"):
+                c["gate"] = {"ok": False, "verdict": "NO TRADE",
+                             "reasons": ["no plan"], "notes": []}
+                continue
+            try:
+                import tech_detail as _td
+                px = _td.detail(sym).get("close")
+            except Exception:
+                px = None
+            g = _pg.gate({"trigger": pl.get("entry"), "limit": pl.get("limit"),
+                         "stop": pl.get("stop"), "close": px},
+                        sym, close=px, stage2=bool((c.get("trend") or {}).get("stage2")),
+                        base_grade=(c.get("base") or {}).get("grade"),
+                        kind="breakout")
+            c["gate"] = g
+            c["publish"] = bool(g.get("ok"))
+            if not g.get("ok"):
+                print(f"[gate] deep {sym}: {g.get('verdict')} — "
+                      + "; ".join(g.get("reasons") or [])[:120], file=sys.stderr)
     except Exception as e:  # never let this section break the bulletin
         data["deep"] = {"candidates": [], "note": f"deep analysis unavailable: {e}"}
 

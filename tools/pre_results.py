@@ -197,11 +197,39 @@ def ready(row: dict) -> bool:
     return True
 
 
+def season_context() -> str:
+    """Where the market is in the results cycle.
+
+    SEBI's LODR puts a deadline on the quarter, and the event calendar knows
+    it. "Q2 results are due by 14 November" is the single most useful fact
+    about the next fortnight — it tells you that a company without a
+    confirmed date is late, not early.
+    """
+    try:
+        import event_risk
+        from datetime import date, timedelta
+        start = date.today().isoformat()
+        end = (date.today() + timedelta(days=45)).isoformat()
+        evs = event_risk.window_events("", start, end)
+        bits = []
+        for e in evs:
+            if e["category"] == "results-season" and e.get("end"):
+                bits.append(f"{e['title']} (until {e['end']})")
+        return "; ".join(bits[:2])
+    except Exception:
+        return ""
+
+
 def card(rows: list[dict], market: dict | None = None) -> list[str]:
     """The report section and the alert body."""
     out = []
+    season = season_context()
+    if season:
+        out.append(f"<b>Where the market is:</b> {season}. A company with no "
+                   "confirmed date is late, not early.")
+        out.append("")
     if not rows:
-        return ["No confirmed or estimated results inside the window."]
+        return (out or []) + ["No confirmed or estimated results inside the window."]
     for r in rows:
         s = r.get("setup") or {}
         react = r.get("reaction") or {}

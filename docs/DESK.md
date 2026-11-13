@@ -70,6 +70,14 @@ Silence should be a setting, not an unsubscribe.
 A snooze (the button, or `/mode` after 2 hours of quiet) mutes alerts and level breaches but
 never the plan.
 
+### Stale orders
+
+If a published trigger stops making sense — the price has walked 3% or more
+away from the level you were told to buy above — the desk tells you that
+same day, in the alerts feed, in `/book` and in the closing review. A GTT
+sitting on a level nobody is defending is money held out of your risk
+budget for nothing, and nothing else will cancel it for you.
+
 ### Watchlists
 
 `/watch SYMBOL` pins a level **at the moment you add it** — the top of its base, or its 52-week
@@ -114,7 +122,24 @@ relevant than the market's average.
 These are base rates, not forecasts. The market figure counts stock-days, not
 independent events, and the card says so.
 
-## 5. Results ahead — buy the setup, not the gap
+## 5. Event risk — what else lands while you hold it
+
+A swing trade is held for weeks, and something always happens in those
+weeks: an expiry, an RBI decision, a budget, the day results season ends and
+half the market gaps. `tools/event_risk.py` reads the event calendar (the
+`event-calendar` skill) and asks one narrow question about the window
+between the entry and the second target.
+
+Every published plan carries the answer on its card:
+
+> 📅 Inside your holding window: 23 Nov: NSE monthly expiry; 26 Nov: BSE
+> monthly expiry; 04 Dec: RBI MPC policy decision. Size the trade knowing
+> these are there.
+
+Weekly expiries are dropped once the monthly one is in the list — a month of
+expiry dates is a calendar, not risk.
+
+## 6. Results ahead — buy the setup, not the gap
 
 Being told "TCS reported and rose 6%" is worth nothing: the move has already
 happened. So the desk works the other way round.
@@ -135,7 +160,7 @@ It is a small bet on a big day, sized accordingly, and the card says that.
 A results alert goes out **before** the print, only for names whose chart is
 ready, and once per day per name.
 
-## 6. How a call is graded
+## 7. How a call is graded
 
 The desk publishes, stores, and then replays. A plan is keyed on the session it is *for*, not the
 day it was published.
@@ -147,7 +172,7 @@ day it was published.
 - Only `daily` and `eod` runs record new plans; intraday grades the book and never rewrites it.
 - Net R is after Indian charges, not before.
 
-## 7. Where things live
+## 8. Where things live
 
 | File | Job |
 |---|---|
@@ -161,6 +186,7 @@ day it was published.
 | `tools/plan_gate.py` | the one gate every suggestion has to pass |
 | `tools/results_calendar.py` | who reports, when — confirmed dates and history |
 | `tools/pre_results.py` | the results playbook: the setup, the plan, the base rate |
+| `tools/event_risk.py` | what lands inside a plan's holding window |
 | `tools/alert_monitor.py` | news events, price shocks, watchlist pings |
 | `tools/levels_watch.py` | stop / T1 / T2 breaches on the open book |
 | `tools/recs.py` | the book: record, replay, scorecard, attribution |
@@ -176,7 +202,7 @@ day it was published.
 State lives in `data/` (gitignored): `recommendations.json`, `subscribers.json`, `candles/`,
 `breaks.json`, `tradability.json`, `delivery/`, `backups/`. Logs in `logs/`, reports in `reports/`.
 
-## 8. Settings
+## 9. Settings
 
 All optional, all in `.env` (see `.env.example`):
 
@@ -190,7 +216,7 @@ All optional, all in `.env` (see `.env.example`):
 | `TELEGRAM_BOT_TOKEN` | — | required |
 | `TELEGRAM_INVITE_CODE` | — | if set, `/start` needs it |
 
-## 9. Tests
+## 10. Tests
 
 ```bash
 /opt/homebrew/bin/python3 -m unittest discover -s tests -p 'test_desk*.py'

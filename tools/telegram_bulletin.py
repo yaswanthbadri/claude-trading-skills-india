@@ -297,6 +297,10 @@ def msg_plan(p: dict) -> str:
     ]
     for w in (p.get("warnings") or [])[:2]:
         lines.append(f"⚠ {esc(w)}")
+    er = p.get("event_risk") or {}
+    if er.get("text"):
+        lines.append(f"📅 <i>Inside your holding window: {esc(er['text'])}. "
+                     "Size for it.</i>")
     return "\n".join(lines)
 
 
@@ -369,6 +373,18 @@ def msg_deep(d: dict) -> str:
             ev = f"0 of {s['samples']} similar setups doubled in 10 years"
         else:
             ev = "no comparable setup in its history"
+        g = c.get("gate") or {}
+        if g.get("ok") is False:
+            # The entry has gone. Saying so is the honest answer; printing a
+            # level the market has left as if it were an order is not.
+            reasons = g.get("reasons") or []
+            out.append(
+                f"<b>{esc(c['symbol'])}</b>  · grade {esc(c['grade'])} "
+                f"{c['score']:.0f}/100  · RS {c.get('rs_rating') or '—'}\n"
+                f"   <i>{esc(reasons[0] if reasons else 'not actionable now')}</i>\n"
+                f"   <i>{esc(ev)}</i>"
+            )
+            continue
         out.append(
             f"<b>{esc(c['symbol'])}</b>  · grade {esc(c['grade'])} {c['score']:.0f}/100  · "
             f"RS {c.get('rs_rating') or '—'}\n"
